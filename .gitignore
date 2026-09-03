@@ -1,0 +1,32 @@
+# Build and cache directories
+build/
+bin/
+lib/
+out/
+.cache/
+*.obj
+*.o
+*.lib
+*.a
+*.dll
+*.so
+*.dylib
+*.pdb
+*.exe
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+dist/
+
+# Captured data files
+captures/
+*.atkdl_extracted/
+
+# Upstream reference clone (tracked externally if needed)
+upstream/
+third_party/libusb/*.7z
+third_party/libusb/*.tar.*
