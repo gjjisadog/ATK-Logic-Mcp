@@ -1,0 +1,48 @@
+# DK9 HIL Test Specification
+# Target Scenario: Hybrid30K + TMS320F28P65 + DK9 OpenLoop PWM + ATK-DL16
+
+test_suite: "DK9 OpenLoop PWM Verification"
+version: "1.0.0"
+
+device:
+  expected_model: "DL16"
+  min_hardware_version: 1
+
+capture:
+  channels: [0, 1, 2, 3, 4, 5]
+  channel_map:
+    0: "EPWM1A (Phase U High)"
+    1: "EPWM1B (Phase U Low)"
+    2: "EPWM2A (Phase V High)"
+    3: "EPWM2B (Phase V Low)"
+    4: "EPWM3A (Phase W High)"
+    5: "EPWM3B (Phase W Low)"
+  sample_rate_hz: 100000000 # 100 MHz
+  duration_ms: 20            # 20 ms (400 cycles at 20 kHz)
+  threshold_voltage: 1.65    # 3.3V LVCMOS midpoint
+  trigger: "immediate"
+  mode: "buffer"
+
+assertions:
+  pwm_frequency:
+    target_hz: 20000.0       # 20 kHz switching frequency
+    tolerance_hz: 100.0      # +/- 100 Hz (0.5%)
+    max_jitter_rms_ns: 20.0  # F28P65 ePWM jitter limit
+
+  duty_cycle:
+    target: 0.50             # 50% open-loop duty
+    tolerance: 0.02          # +/- 2%
+
+  deadtime:
+    target_ns: 1000.0        # 1.0 us deadband
+    min_allowed_ns: 800.0    # Hard minimum
+    max_allowed_ns: 1200.0   # Hard maximum
+
+  shoot_through_protection:
+    allow_overlap: false     # Zero overlap allowed between complementary pairs
+    max_overlap_samples: 0
+
+  three_phase_balance:
+    phase_shift_target_deg: 120.0
+    phase_shift_tolerance_deg: 5.0
+    max_freq_diff_hz: 50.0
