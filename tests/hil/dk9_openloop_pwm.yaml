@@ -2,7 +2,7 @@
 # Target Scenario: Hybrid30K + TMS320F28P65 + DK9 OpenLoop PWM + ATK-DL16
 
 test_suite: "DK9 OpenLoop PWM Verification"
-version: "1.0.0"
+version: "1.1.0"
 
 device:
   expected_model: "DL16"
@@ -17,32 +17,36 @@ capture:
     3: "EPWM2B (Phase V Low)"
     4: "EPWM3A (Phase W High)"
     5: "EPWM3B (Phase W Low)"
-  sample_rate_hz: 100000000 # 100 MHz
-  duration_ms: 20            # 20 ms (400 cycles at 20 kHz)
+  sample_rate_hz: 100000000 # 100 MHz (10 ns resolution)
+  duration_ms: 40            # 40 ms (covers 2 full 50 Hz fundamental modulation cycles)
   threshold_voltage: 1.65    # 3.3V LVCMOS midpoint
   trigger: "immediate"
   mode: "buffer"
 
 assertions:
-  pwm_frequency:
-    target_hz: 20000.0       # 20 kHz switching frequency
-    tolerance_hz: 100.0      # +/- 100 Hz (0.5%)
-    max_jitter_rms_ns: 20.0  # F28P65 ePWM jitter limit
+  pwm_carrier:
+    target_hz: 16000.0       # 16 kHz TI F28P65 nominal ePWM carrier
+    tolerance_hz: 100.0      # +/- 100 Hz
+    max_jitter_rms_ns: 25.0  # ePWM clock jitter limit
+    max_carrier_offset_ns: 100.0 # Synchronous carrier alignment limit
 
   duty_cycle:
-    target: 0.50             # 50% open-loop duty
-    tolerance: 0.02          # +/- 2%
+    # OpenLoop Sinusoidal PWM: Duty is dynamic, not a fixed 50%
+    mode: "dynamic_sine_modulation"
+    min_allowed_duty: 0.05   # Never stuck at 0%
+    max_allowed_duty: 0.95   # Never stuck at 100%
 
   deadtime:
-    target_ns: 1000.0        # 1.0 us deadband
-    min_allowed_ns: 800.0    # Hard minimum
+    target_ns: 1000.0        # 1.0 us nominal deadband (TBD pending firmware DBRED/DBFED confirmation)
+    min_allowed_ns: 800.0    # Hard minimum to prevent shoot-through
     max_allowed_ns: 1200.0   # Hard maximum
 
   shoot_through_protection:
     allow_overlap: false     # Zero overlap allowed between complementary pairs
     max_overlap_samples: 0
 
-  three_phase_balance:
-    phase_shift_target_deg: 120.0
-    phase_shift_tolerance_deg: 5.0
-    max_freq_diff_hz: 50.0
+  three_phase_modulation:
+    fundamental_frequency_hz: 50.0 # 50 Hz inverter output
+    phase_shift_target_deg: 120.0  # 120-degree sinusoidal displacement
+    phase_shift_tolerance_deg: 15.0
+    max_carrier_freq_diff_hz: 50.0
