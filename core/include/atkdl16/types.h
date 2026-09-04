@@ -108,6 +108,23 @@ struct CaptureConfig {
     }
 };
 
+// Data Integrity Level
+enum class DataIntegrity {
+    Unknown,
+    Complete,
+    Incomplete,
+    Overflow
+};
+
+inline const char* to_string(DataIntegrity di) {
+    switch (di) {
+        case DataIntegrity::Complete: return "COMPLETE";
+        case DataIntegrity::Incomplete: return "INCOMPLETE";
+        case DataIntegrity::Overflow: return "OVERFLOW";
+        default: return "UNKNOWN";
+    }
+}
+
 // Edge definition for deterministic analysis
 struct Edge {
     uint64_t sample_index{0};
@@ -125,11 +142,23 @@ struct ChannelEdges {
 struct CaptureResult {
     std::string capture_id;
     bool success{false};
+    ErrorCode error_code{ErrorCode::Ok};
     std::string error_message;
     std::vector<std::string> warnings;
     CaptureConfig config;
-    uint64_t actual_samples{0};
+
+    DataIntegrity data_integrity{DataIntegrity::Unknown};
+    uint64_t requested_samples{0};
+    std::map<uint8_t, uint64_t> actual_samples_per_channel;
+    uint64_t minimum_actual_samples{0};
+    uint64_t actual_samples{0}; // Minimum valid across enabled channels
     uint64_t trigger_offset{0};
+    bool trigger_offset_received{false};
+    bool trigger_ack_received{false};
+    bool capture_complete_received{false};
+    bool capacity_exceeded{false};
+    bool bandwidth_exceeded{false};
+
     std::map<uint8_t, ChannelEdges> channel_edges;
 };
 

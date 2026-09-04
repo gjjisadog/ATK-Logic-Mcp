@@ -80,14 +80,13 @@ static void print_usage() {
               << "  list                          List connected DL16 devices\n"
               << "  info                          Display detailed hardware information\n"
               << "  capture [options]             Perform capture and store raw samples\n"
-              << "  inspect --id <capture_id>     Inspect edge list of a previous capture\n"
-              << "  stop                          Stop active capture on device\n\n"
+              << "  inspect --id <capture_id>     Inspect edge list of a previous capture\n\n"
               << "Capture Options:\n"
               << "  --channels <0,1,...>          Enabled channels (default: 0,1)\n"
               << "  --sample-rate <rate>          Sample rate (e.g. 20M, 100M, 1G, default: 20M)\n"
               << "  --duration <ms>               Capture duration (e.g. 20ms, 100ms, default: 20ms)\n"
               << "  --threshold <voltage>         Comparator threshold voltage (e.g. 1.6, default: 1.6)\n"
-              << "  --mode <buffer|stream>        Capture mode (default: buffer)\n"
+              << "  --mode <buffer|stream>        Capture mode (buffer = standard, stream = experimental, default: buffer)\n"
               << "  --trigger <ch:edge>           Trigger spec (e.g. ch0:rising, immediate, default: immediate)\n"
               << "  --out <dir>                   Output directory for captures (default: captures)\n";
 }
@@ -179,9 +178,11 @@ int main(int argc, char* argv[]) {
         }
 
         std::cout << "Capture successful!\n"
-                  << "  capture_id: " << result.capture_id << "\n"
-                  << "  samples:    " << result.actual_samples << "\n"
-                  << "  output_dir: " << out_dir << "/" << result.capture_id << "\n";
+                  << "  capture_id:     " << result.capture_id << "\n"
+                  << "  integrity:      " << to_string(result.data_integrity) << "\n"
+                  << "  requested:      " << result.requested_samples << "\n"
+                  << "  actual_samples: " << result.actual_samples << "\n"
+                  << "  output_dir:     " << out_dir << "/" << result.capture_id << "\n";
         return 0;
     }
 

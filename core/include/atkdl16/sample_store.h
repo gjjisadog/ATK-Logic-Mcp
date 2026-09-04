@@ -38,12 +38,15 @@ public:
     // Extract edges for all enabled channels
     std::map<uint8_t, ChannelEdges> extract_all_edges() const;
 
+    // Validate data completeness across all enabled channels
+    DataIntegrity validate_integrity(uint64_t requested_samples, std::vector<std::string>& warnings) const;
+
     // Save capture artifacts to target directory:
     // captures/<capture-id>/
     //   meta.json
     //   ch00.bits, ch01.bits...
     //   edges.json
-    bool save_to_directory(const std::string& directory_path, const std::string& capture_id) const;
+    bool save_to_directory(const std::string& directory_path, const std::string& capture_id, const CaptureResult* result = nullptr) const;
 
     // Load capture from directory for replay/inspection
     static std::unique_ptr<SampleStore> load_from_directory(const std::string& directory_path);

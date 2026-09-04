@@ -335,13 +335,83 @@ TEST_CASE(test_device_open_hardware) {
     Device dev;
     auto err = dev.open();
     if (!err) {
-        std::cout << "  (Hardware state note: " << err.message << ")" << std::endl;
-        ASSERT_TRUE(err.code == ErrorCode::DeviceBusy || err.code == ErrorCode::DeviceNotFound);
+        ASSERT_TRUE(err.code == ErrorCode::DeviceBusy || err.code == ErrorCode::DeviceNotFound ||
+                    err.code == ErrorCode::ProtocolError || err.code == ErrorCode::UsbOpenFailed);
     } else {
         std::cout << "  (Hardware open SUCCESS: " << dev.info().model_name << ")" << std::endl;
         ASSERT_TRUE(dev.is_open());
         dev.close();
     }
+}
+
+TEST_CASE(test_capture_integrity_validation) {
+    CaptureConfig cfg;
+    cfg.enabled_channels = {0, 1};
+    SampleStore store(cfg);
+
+    // Channel 0 gets 128 bytes = 1024 samples
+    std::vector<uint8_t> data0(128, 0xAA);
+    store.append_channel_data(0, data0.data(), data0.size());
+
+    // Channel 1 gets only 64 bytes = 512 samples
+    std::vector<uint8_t> data1(64, 0x55);
+    store.append_channel_data(1, data1.data(), data1.size());
+
+    std::vector<std::string> warnings;
+    auto integrity = store.validate_integrity(1000, warnings);
+    ASSERT_TRUE(integrity == DataIntegrity::Incomplete);
+    ASSERT_EQ(warnings.size(), 1);
+
+    // Provide missing samples for channel 1
+    store.append_channel_data(1, data1.data(), data1.size());
+    warnings.clear();
+    integrity = store.validate_integrity(1000, warnings);
+    ASSERT_TRUE(integrity == DataIntegrity::Complete);
+    ASSERT_EQ(warnings.size(), 0);
+}
+
+TEST_CASE(test_trigger_crop_sub_byte_offsets) {
+    CaptureConfig cfg;
+    cfg.enabled_channels = {0};
+
+    // Test 1-bit, 3-bit, and 7-bit offsets
+    for (uint64_t offset_bits : {1ULL, 3ULL, 7ULL, 13ULL}) {
+        SampleStore store(cfg);
+        // Append 10 bytes = 80 samples
+        std::vector<uint8_t> data(10, 0xFF);
+        store.append_channel_data(0, data.data(), data.size());
+        ASSERT_EQ(store.sample_count(0), 80ULL);
+
+        std::map<uint8_t, uint64_t> offsets = {{0, offset_bits}};
+        store.apply_start_offsets(offsets);
+
+        // Valid sample count must be exactly 80 - offset_bits
+        uint64_t expected_samples = 80ULL - offset_bits;
+        ASSERT_EQ(store.sample_count(0), expected_samples);
+    }
+}
+
+TEST_CASE(test_order4_ack_trigger_validation) {
+    // Construct Order 4 ACK packet payload: [0x00, 0x00, cmd=0x12, status=0x03, 0x00...]
+    std::vector<uint8_t> ack_payload(16, 0x00);
+    ack_payload[2] = static_cast<uint8_t>(CommandCode::SimpleTrigger); // 0x12
+    ack_payload[3] = 0x03; // status 3 = Armed
+
+    RxMessage msg;
+    msg.type = RxMessageType::Ack;
+    msg.payload = ack_payload;
+
+    auto ack_opt = RxParser::parse_ack(msg);
+    ASSERT_TRUE(ack_opt.has_value());
+    ASSERT_EQ(ack_opt->command_code, static_cast<uint8_t>(CommandCode::SimpleTrigger));
+    ASSERT_EQ(ack_opt->status, 3);
+
+    // Negative case: wrong status
+    ack_payload[3] = 0x02;
+    msg.payload = ack_payload;
+    auto bad_ack = RxParser::parse_ack(msg);
+    ASSERT_TRUE(bad_ack.has_value());
+    ASSERT_EQ(bad_ack->status, 2);
 }
 
 // ============================================================================

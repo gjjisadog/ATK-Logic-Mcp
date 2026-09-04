@@ -34,10 +34,18 @@ void SampleStore::apply_start_offsets(const std::map<uint8_t, uint64_t>& start_o
         m_start_offsets[ch] = offset_bits;
         auto it = m_channel_data.find(ch);
         if (it == m_channel_data.end() || it->second.empty()) {
+            m_channel_sample_counts[ch] = 0;
             continue;
         }
 
         auto& buf = it->second;
+        uint64_t orig_samples = m_channel_sample_counts[ch];
+        if (offset_bits >= orig_samples) {
+            buf.clear();
+            m_channel_sample_counts[ch] = 0;
+            continue;
+        }
+
         size_t remove_bytes = static_cast<size_t>(offset_bits / 8ULL);
         size_t bit_shift = static_cast<size_t>(offset_bits % 8ULL);
 
@@ -60,26 +68,58 @@ void SampleStore::apply_start_offsets(const std::map<uint8_t, uint64_t>& start_o
             buf[n - 1] = static_cast<uint8_t>(buf[n - 1] >> bit_shift);
         }
 
-        m_channel_sample_counts[ch] = buf.size() * 8ULL;
+        // Remaining valid samples count is EXACTLY orig_samples - offset_bits
+        uint64_t remaining_samples = orig_samples - offset_bits;
+        m_channel_sample_counts[ch] = remaining_samples;
+
+        // Truncate trailing unused storage bytes
+        size_t needed_bytes = static_cast<size_t>((remaining_samples + 7) / 8);
+        if (buf.size() > needed_bytes) {
+            buf.resize(needed_bytes);
+        }
+        // Zero out unused trailing padding bits in the last byte
+        size_t rem_bits = remaining_samples % 8;
+        if (rem_bits > 0 && !buf.empty()) {
+            uint8_t mask = static_cast<uint8_t>((1 << rem_bits) - 1);
+            buf.back() &= mask;
+        }
     }
 }
 
 void SampleStore::finalize_samples(uint64_t target_samples) {
-    size_t target_bytes = static_cast<size_t>((target_samples + 7) / 8);
-
     for (auto& [ch, buf] : m_channel_data) {
+        uint64_t valid_s = m_channel_sample_counts[ch];
+        if (valid_s > target_samples) {
+            valid_s = target_samples;
+            m_channel_sample_counts[ch] = target_samples;
+        }
+        size_t target_bytes = static_cast<size_t>((valid_s + 7) / 8);
         if (buf.size() > target_bytes) {
             buf.resize(target_bytes);
         }
         // Zero out unused padding bits in the last byte
-        size_t remaining_bits = target_samples % 8;
+        size_t remaining_bits = valid_s % 8;
         if (remaining_bits > 0 && !buf.empty()) {
             uint8_t mask = static_cast<uint8_t>((1 << remaining_bits) - 1);
             buf.back() &= mask;
         }
-        m_channel_sample_counts[ch] = std::min(static_cast<uint64_t>(buf.size() * 8ULL), target_samples);
     }
     m_is_finalized = true;
+}
+
+DataIntegrity SampleStore::validate_integrity(uint64_t requested_samples, std::vector<std::string>& warnings) const {
+    bool complete = true;
+    for (uint8_t ch : m_config.enabled_channels) {
+        auto it = m_channel_sample_counts.find(ch);
+        uint64_t count = (it != m_channel_sample_counts.end()) ? it->second : 0;
+        if (count < requested_samples) {
+            complete = false;
+            warnings.push_back("Channel " + std::to_string(ch) + " has " +
+                               std::to_string(count) + " valid samples (requested " +
+                               std::to_string(requested_samples) + ")");
+        }
+    }
+    return complete ? DataIntegrity::Complete : DataIntegrity::Incomplete;
 }
 
 uint8_t SampleStore::get_sample(uint8_t channel, uint64_t sample_index) const {
@@ -212,7 +252,7 @@ std::map<uint8_t, ChannelEdges> SampleStore::extract_all_edges() const {
     return all_edges;
 }
 
-bool SampleStore::save_to_directory(const std::string& directory_path, const std::string& capture_id) const {
+bool SampleStore::save_to_directory(const std::string& directory_path, const std::string& capture_id, const CaptureResult* result) const {
     try {
         fs::path target_dir = fs::path(directory_path) / capture_id;
         fs::create_directories(target_dir);
@@ -268,6 +308,16 @@ bool SampleStore::save_to_directory(const std::string& directory_path, const std
         meta_out << "  \"threshold_voltage\": " << m_config.threshold_voltage << ",\n";
         meta_out << "  \"rle_enabled\": " << (m_config.enable_rle ? "true" : "false") << ",\n";
         meta_out << "  \"trigger_position_percent\": " << m_config.trigger.position_percent << ",\n";
+        if (result) {
+            meta_out << "  \"data_integrity\": \"" << to_string(result->data_integrity) << "\",\n";
+            meta_out << "  \"requested_samples\": " << result->requested_samples << ",\n";
+            meta_out << "  \"actual_samples\": " << result->actual_samples << ",\n";
+            meta_out << "  \"trigger_offset\": " << result->trigger_offset << ",\n";
+            meta_out << "  \"trigger_ack_received\": " << (result->trigger_ack_received ? "true" : "false") << ",\n";
+            meta_out << "  \"capture_complete_received\": " << (result->capture_complete_received ? "true" : "false") << ",\n";
+            meta_out << "  \"capacity_exceeded\": " << (result->capacity_exceeded ? "true" : "false") << ",\n";
+            meta_out << "  \"bandwidth_exceeded\": " << (result->bandwidth_exceeded ? "true" : "false") << ",\n";
+        }
         meta_out << "  \"channels\": [";
         for (size_t i = 0; i < m_config.enabled_channels.size(); ++i) {
             meta_out << static_cast<int>(m_config.enabled_channels[i]);

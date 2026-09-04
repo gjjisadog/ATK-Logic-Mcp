@@ -77,20 +77,66 @@ CaptureResult CaptureEngine::execute_capture(const CaptureConfig& config,
     m_state = CaptureState::Settle;
     std::this_thread::sleep_for(std::chrono::milliseconds(FPGA_DAC_SETTLING_DELAY_MS));
 
-    // 5. ARM_TRIGGER State
+    // 5. ARM_TRIGGER State: Send SimpleTrigger and wait for Order 4 ACK (cmd 0x12, status == 3)
     m_state = CaptureState::ArmTrigger;
     auto trig_frame = build_simple_trigger_frame(config);
     err = m_device.transport().write_bulk(EP_BULK_OUT, trig_frame.data(), trig_frame.size(), 200);
     if (!err) {
         m_state = CaptureState::Error;
+        result.error_code = ErrorCode::UsbTransferError;
         result.error_message = "Failed to send SimpleTrigger command: " + err.message;
+        return result;
+    }
+
+    SampleStore store(config);
+    RxParser parser;
+    std::vector<uint8_t> raw_buf(READ_TRANSFER_BUFFER_SIZE);
+    std::vector<uint8_t> conv_buf(READ_TRANSFER_BUFFER_SIZE);
+
+    // Wait for SimpleTrigger confirmation (Order 4 ACK, command_code == 0x12, status == 3)
+    bool ack_confirmed = false;
+    auto arm_start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - arm_start < std::chrono::milliseconds(1500)) {
+        size_t actual_len = 0;
+        err = m_device.transport().read_bulk(EP_BULK_IN, raw_buf.data(), raw_buf.size(), actual_len, 200);
+        if (err && actual_len >= USB_BLOCK_SIZE) {
+            size_t aligned_len = (actual_len / USB_BLOCK_SIZE) * USB_BLOCK_SIZE;
+            if (conv_buf.size() < aligned_len) conv_buf.resize(aligned_len);
+            convert_to_pc(raw_buf.data(), conv_buf.data(), aligned_len);
+            parser.push_bytes(conv_buf.data(), aligned_len);
+
+            while (parser.has_message()) {
+                auto msg_opt = parser.pop_message();
+                if (!msg_opt) break;
+                if (msg_opt->type == RxMessageType::Ack) {
+                    auto ack_opt = RxParser::parse_ack(*msg_opt);
+                    if (ack_opt && ack_opt->command_code == static_cast<uint8_t>(CommandCode::SimpleTrigger)) {
+                        if (ack_opt->status == 3) {
+                            ack_confirmed = true;
+                            result.trigger_ack_received = true;
+                            break;
+                        } else {
+                            m_state = CaptureState::Error;
+                            result.error_code = ErrorCode::ProtocolError;
+                            result.error_message = "SimpleTrigger ACK rejected by FPGA with status " + std::to_string(ack_opt->status);
+                            return result;
+                        }
+                    }
+                }
+            }
+            if (ack_confirmed) break;
+        }
+    }
+
+    if (!ack_confirmed) {
+        m_state = CaptureState::Error;
+        result.error_code = ErrorCode::ProtocolError;
+        result.error_message = "Timed out waiting for SimpleTrigger confirmation (Order 4 ACK status=3)";
         return result;
     }
 
     // 6. CAPTURING State
     m_state = CaptureState::Capturing;
-    SampleStore store(config);
-    RxParser parser;
 
     std::map<uint8_t, uint64_t> channel_start_offsets;
     bool received_trigger_offset = false;
@@ -101,16 +147,13 @@ CaptureResult CaptureEngine::execute_capture(const CaptureConfig& config,
     auto start_time = std::chrono::steady_clock::now();
     auto timeout_duration = std::chrono::seconds(timeout_sec);
 
-    // Capture Loop: reads converted bulk blocks via transport
-    std::vector<uint8_t> raw_buf(READ_TRANSFER_BUFFER_SIZE);
-    std::vector<uint8_t> conv_buf(READ_TRANSFER_BUFFER_SIZE);
-
     while (!m_stop_requested && !capture_complete) {
         // Check timeout
         auto elapsed = std::chrono::steady_clock::now() - start_time;
         if (elapsed > timeout_duration) {
             stop();
             m_state = CaptureState::Error;
+            result.error_code = ErrorCode::CaptureTimeout;
             result.error_message = "Capture timed out waiting for trigger or completion";
             return result;
         }
@@ -119,6 +162,7 @@ CaptureResult CaptureEngine::execute_capture(const CaptureConfig& config,
         err = m_device.transport().read_bulk(EP_BULK_IN, raw_buf.data(), raw_buf.size(), actual_len, 200);
         if (!err && err.code == ErrorCode::DeviceDisconnected) {
             m_state = CaptureState::Error;
+            result.error_code = ErrorCode::DeviceDisconnected;
             result.error_message = "Device disconnected during capture";
             return result;
         }
@@ -149,6 +193,25 @@ CaptureResult CaptureEngine::execute_capture(const CaptureConfig& config,
                         auto trig_opt = RxParser::parse_trigger_offset(msg, TOTAL_CHANNELS, config.enable_rle);
                         if (trig_opt) {
                             result.trigger_offset = trig_opt->trigger_sample_offset;
+                            result.trigger_offset_received = true;
+
+                            if (trig_opt->exceed_capacity) {
+                                result.capacity_exceeded = true;
+                                result.data_integrity = DataIntegrity::Overflow;
+                                result.error_code = ErrorCode::CapacityExceeded;
+                                result.error_message = "Capture exceeded on-device memory capacity";
+                                m_state = CaptureState::Error;
+                                return result;
+                            }
+                            if (trig_opt->exceed_bandwidth) {
+                                result.bandwidth_exceeded = true;
+                                result.data_integrity = DataIntegrity::Overflow;
+                                result.error_code = ErrorCode::BandwidthExceeded;
+                                result.error_message = "Capture exceeded USB streaming bandwidth limit";
+                                m_state = CaptureState::Error;
+                                return result;
+                            }
+
                             for (size_t i = 0; i < trig_opt->channel_byte_counts.size(); ++i) {
                                 uint64_t total_bits = trig_opt->channel_byte_counts[i] * 8ULL;
                                 if (total_bits > target_samples) {
@@ -176,11 +239,11 @@ CaptureResult CaptureEngine::execute_capture(const CaptureConfig& config,
                         break;
                     }
                     case RxMessageType::Ack: {
-                        // Handled during arming
                         break;
                     }
                     case RxMessageType::Complete: {
                         capture_complete = true;
+                        result.capture_complete_received = true;
                         m_state = CaptureState::Complete;
                         break;
                     }
@@ -191,8 +254,13 @@ CaptureResult CaptureEngine::execute_capture(const CaptureConfig& config,
         }
     }
 
-    if (m_stop_requested && !capture_complete) {
-        result.error_message = "Capture was cancelled by user";
+    if (!capture_complete) {
+        result.capture_complete_received = false;
+        result.data_integrity = DataIntegrity::Incomplete;
+        result.success = false;
+        result.error_code = m_stop_requested ? ErrorCode::Ok : ErrorCode::CaptureTimeout;
+        result.error_message = m_stop_requested ? "Capture was cancelled by user before completion" : "Capture timed out before Order 6 Complete received";
+        m_state = CaptureState::Error;
         return result;
     }
 
@@ -202,12 +270,40 @@ CaptureResult CaptureEngine::execute_capture(const CaptureConfig& config,
     }
     store.finalize_samples(target_samples);
 
-    // 8. Extract Edges and Save Artifacts
-    result.actual_samples = target_samples;
-    result.channel_edges = store.extract_all_edges();
-    result.success = true;
+    // 8. Verify data completeness across all enabled channels
+    result.requested_samples = target_samples;
+    uint64_t min_samples = UINT64_MAX;
+    bool all_channels_complete = true;
 
-    store.save_to_directory(capture_dir, result.capture_id);
+    for (uint8_t ch : config.enabled_channels) {
+        uint64_t ch_samples = store.sample_count(ch);
+        result.actual_samples_per_channel[ch] = ch_samples;
+        if (ch_samples < min_samples) {
+            min_samples = ch_samples;
+        }
+        if (ch_samples < target_samples) {
+            all_channels_complete = false;
+            result.warnings.push_back("Channel " + std::to_string(ch) + " is incomplete: received " +
+                                      std::to_string(ch_samples) + " / " + std::to_string(target_samples) + " samples");
+        }
+    }
+    result.minimum_actual_samples = (min_samples == UINT64_MAX) ? 0 : min_samples;
+    result.actual_samples = result.minimum_actual_samples;
+
+    if (!all_channels_complete) {
+        result.data_integrity = DataIntegrity::Incomplete;
+        result.success = false;
+        result.error_code = ErrorCode::IncompleteCapture;
+        result.error_message = "Capture incomplete: one or more channels did not receive requested sample count";
+        m_state = CaptureState::Error;
+        return result;
+    }
+
+    result.data_integrity = DataIntegrity::Complete;
+    result.success = true;
+    result.channel_edges = store.extract_all_edges();
+
+    store.save_to_directory(capture_dir, result.capture_id, &result);
 
     m_state = CaptureState::DeviceReady;
     return result;
