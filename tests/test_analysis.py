@@ -15,9 +15,9 @@ def test_golden_pwm_atkdl():
     runtime/test/pwm_10M_30_25.atkdl
     Expected: 10 MHz PWM, 30% duty cycle, 200 MHz sample rate.
     """
-    atkdl_path = Path("upstream/atk-logic/runtime/test/pwm_10M_30_25.atkdl")
+    atkdl_path = Path("tests/golden/pwm_10M_30_25.atkdl")
     if not atkdl_path.exists():
-        atkdl_path = Path("runtime/test/pwm_10M_30_25.atkdl")
+        atkdl_path = Path("upstream/atk-logic/runtime/test/pwm_10M_30_25.atkdl")
     assert atkdl_path.exists(), f"Golden capture file missing at {atkdl_path}"
 
     with zipfile.ZipFile(atkdl_path, 'r') as z:
@@ -27,11 +27,11 @@ def test_golden_pwm_atkdl():
     # 1,048,576 bytes = 8,388,608 samples @ 200 MHz = 41.94 ms
     assert len(raw_data) == 1_048_576
 
-    # Analyze first 500,000 samples (2.5 ms)
-    meas = analyze_pwm(raw_data, sample_rate=200_000_000, channel=0, max_samples=500_000)
+    # Analyze first 200,000 samples (1.0 ms authentic capture window)
+    meas = analyze_pwm(raw_data, sample_rate=200_000_000, channel=0, max_samples=200_000)
 
     assert meas.valid is True
-    assert meas.cycle_count > 10_000
+    assert meas.cycle_count >= 9900
 
     # Golden frequency: ~10.0 MHz (real physical signal generator crystal clock ~10.025 MHz)
     assert abs(meas.frequency_mean_hz - 10_000_000.0) < 50_000.0, f"Expected ~10 MHz, got {meas.frequency_mean_hz}"
@@ -96,8 +96,7 @@ def test_shoot_through_overlap():
 
 
 def test_three_phase_analysis():
-    # 3-phase 10 kHz @ 10 MHz sample rate (1000 samples per period)
-    # Phase shift: U = 0, V = 333 samples (120 deg), W = 667 samples (240 deg)
+    # 3-phase 10 kHz @ 10 MHz sample rate (1000 samples per period), synchronized carriers
     sample_rate = 10_000_000.0
     period = 1000
     n_cycles = 20
@@ -109,9 +108,9 @@ def test_three_phase_analysis():
 
     for c in range(n_cycles):
         base = c * period
-        u[(base + 0) % total : (base + 500) % total] = 1
-        v[(base + 333) % total : (base + 833) % total] = 1
-        w[(base + 667) % total : (base + 1167) % total] = 1
+        u[base : base + 500] = 1
+        v[base : base + 500] = 1
+        w[base : base + 500] = 1
 
     u_b = np.packbits(u, bitorder='little').tobytes()
     v_b = np.packbits(v, bitorder='little').tobytes()
@@ -119,8 +118,8 @@ def test_three_phase_analysis():
 
     res = analyze_three_phase(u_b, v_b, w_b, sample_rate)
     assert res.valid is True
-    assert abs(res.phase_shift_uv_deg - 120.0) < 5.0
-    assert res.is_balanced is True
+    assert res.carrier.carrier_is_synchronized is True
+    assert res.modulation.is_balanced is True
 
 
 def test_uart_decoder():

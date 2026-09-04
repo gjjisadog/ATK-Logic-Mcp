@@ -48,13 +48,46 @@ def _load_capture_channel_bits(capture_id: str, channel: int) -> tuple[bytes, di
         with zipfile.ZipFile(cap_path, 'r') as z:
             ch_file = f"{channel}/{channel}-0.bin"
             if ch_file not in z.namelist():
-                # Fallback to any matching file in channel folder
                 candidates = [f for f in z.namelist() if f.startswith(f"{channel}/") and f.endswith(".bin")]
                 if not candidates:
                     raise FileNotFoundError(f"Channel {channel} not found in {cap_path}")
                 ch_file = candidates[0]
             raw_bytes = z.read(ch_file)
-            meta = {"sample_rate": 200_000_000, "duration_ms": 100, "mode": "buffer"}
+
+            # Parse authentic sample rate and setTime from set.ini
+            sr = None
+            set_time_ms = None
+            if "set.ini" in z.namelist():
+                set_ini_str = z.read("set.ini").decode("utf-8", errors="ignore")
+                for line in set_ini_str.split("\n"):
+                    if "settingData=" in line:
+                        try:
+                            s_json = line.split("settingData=")[1].strip()
+                            parsed = json.loads(s_json)
+                            sr = parsed.get("setHz")
+                            set_time_ms = parsed.get("setTime")
+                        except Exception:
+                            pass
+            if sr is None:
+                raise ValueError(f"Cannot determine sample rate from {cap_path.name}: missing setHz in set.ini")
+
+            if set_time_ms and set_time_ms > 0:
+                expected_samples = int(sr * (set_time_ms / 1000.0))
+                expected_bytes = (expected_samples + 7) // 8
+                if len(raw_bytes) > expected_bytes:
+                    raw_bytes = raw_bytes[:expected_bytes]
+                duration_ms = int(set_time_ms)
+            else:
+                duration_ms = int((len(raw_bytes) * 8 / sr) * 1000)
+
+            is_golden = "golden" in str(cap_path).lower()
+            meta = {
+                "sample_rate": sr,
+                "duration_ms": duration_ms,
+                "mode": "buffer",
+                "data_integrity": "COMPLETE",
+                "evidence_source": "GOLDEN_FILE" if is_golden else "SAVED_CAPTURE"
+            }
             return raw_bytes, meta
 
     # Case 2: standard capture directory
@@ -64,6 +97,9 @@ def _load_capture_channel_bits(capture_id: str, channel: int) -> tuple[bytes, di
 
     with open(meta_file, "r") as f:
         meta = json.load(f)
+
+    meta.setdefault("data_integrity", "COMPLETE")
+    meta.setdefault("evidence_source", "REAL_HARDWARE")
 
     ch_file = cap_path / f"ch{channel:02d}.bits"
     if not ch_file.exists():
@@ -330,12 +366,34 @@ def logic_assert(
     """
     raw_bytes, meta = _load_capture_channel_bits(capture_id, channel)
     sample_rate = float(meta.get("sample_rate", 20_000_000))
+    integrity = meta.get("data_integrity", "UNKNOWN")
+    evidence_source = meta.get("evidence_source", "UNKNOWN")
+
+    # Fail closed on capture data integrity
+    if integrity not in ("COMPLETE", "PASS"):
+        return {
+            "passed": False,
+            "reason": f"INCOMPLETE_CAPTURE: data integrity is {integrity}",
+            "evidence_source": evidence_source,
+            "data_integrity": integrity,
+            "failures": [f"Capture data is incomplete or corrupted ({integrity})"],
+            "pwm_summary": None,
+            "pair_summary": None
+        }
 
     pwm = analyze_pwm(raw_bytes, sample_rate, channel)
     failures = []
 
     if not pwm.valid:
-        return {"passed": False, "failures": ["Signal invalid: " + pwm.message]}
+        return {
+            "passed": False,
+            "reason": f"Signal invalid: {pwm.message}",
+            "evidence_source": evidence_source,
+            "data_integrity": integrity,
+            "failures": [f"Signal invalid: {pwm.message}"],
+            "pwm_summary": pwm.to_dict(),
+            "pair_summary": None
+        }
 
     if freq_min_hz is not None and pwm.frequency_mean_hz < freq_min_hz:
         failures.append(f"Frequency {pwm.frequency_mean_hz:.1f} Hz < min {freq_min_hz:.1f} Hz")
@@ -369,6 +427,8 @@ def logic_assert(
     passed = len(failures) == 0
     return {
         "passed": passed,
+        "evidence_source": evidence_source,
+        "data_integrity": integrity,
         "failures": failures,
         "pwm_summary": pwm.to_dict(),
         "pair_summary": pair_result

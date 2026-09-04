@@ -10,7 +10,7 @@ from atk_dl16_mcp.server import (
     logic_measure_three_phase
 )
 
-GOLDEN_ATKDL = "upstream/atk-logic/runtime/test/pwm_10M_30_25.atkdl"
+GOLDEN_ATKDL = "tests/golden/pwm_10M_30_25.atkdl"
 
 
 def test_mcp_logic_status():

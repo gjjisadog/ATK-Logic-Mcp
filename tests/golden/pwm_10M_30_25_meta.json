@@ -1,0 +1,19 @@
+{
+  "description": "Golden reference capture from official alientek-openedv/atk-logic upstream repository",
+  "archive_filename": "pwm_10M_30_25.atkdl",
+  "source_path": "runtime/test/pwm_10M_30_25.atkdl",
+  "upstream_commit": "0dff562d24436def2bec3791684f1911997b9e35",
+  "license": "GPL-3.0-or-later",
+  "device_model": "DL16 Plus",
+  "channel": 0,
+  "sample_rate_hz": 200000000,
+  "raw_byte_length": 1048576,
+  "sample_count": 8388608,
+  "expected_metrics": {
+    "frequency_nominal_hz": 10000000.0,
+    "duty_cycle_nominal": 0.30,
+    "period_samples": 20,
+    "high_samples": 6,
+    "low_samples": 14
+  }
+}

@@ -22,9 +22,8 @@ TEST_CASE(test_crc32_standard) {
     const char* str = "123456789";
     uint32_t crc = compute_crc32(reinterpret_cast<const uint8_t*>(str), 9);
     // Upstream CRC32 on "123456789":
-    // Let's verify non-zero and consistency
-    ASSERT_TRUE(crc != 0);
-    ASSERT_TRUE(crc != 0xFFFFFFFF);
+    // Initial 0, table poly 0xEDB88320: 0xD202D277 (3523400311)
+    ASSERT_EQ(crc, 0xD202D277U);
 
     // Empty buffer check
     ASSERT_EQ(compute_crc32(nullptr, 0), 0xFFFFFFFF);

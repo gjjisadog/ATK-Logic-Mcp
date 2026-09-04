@@ -28,7 +28,7 @@ Derived from the official [alientek-openedv/atk-logic](https://github.com/alient
 ┌───────────────────────────┐   ┌─────────────────────────┐
 │     analysis/ Engine      │   │       atk-dl16 CLI      │
 │  - PWM & Jitter           │   │  list | info | capture  │
-│  - Deadtime & Overlap     │   │  stop | inspect         │
+│  - Deadtime & Overlap     │   │  inspect                │
 │  - 3-Phase Balance        │   └────────────┬────────────┘
 │  - UART / I2C / SPI       │                │
 └───────────────────────────┘                ▼
@@ -54,9 +54,9 @@ Derived from the official [alientek-openedv/atk-logic](https://github.com/alient
 | :--- | :--- | :--- |
 | **Hardware Identification** | `level == 0` | `level == 1` |
 | **Max Sample Rate (Buffer)** | 250 MHz (16 channels) | **1 GHz** ($\le 8$ ch), 500 MHz (16 ch) |
-| **Max Sample Rate (Stream)** | 100 MHz ($\le 3$ ch), 20 MHz (16 ch) | 100 MHz ($\le 3$ ch), 20 MHz (16 ch) |
+| **Max Sample Rate (Stream)** *(Experimental)* | 100 MHz ($\le 3$ ch), 20 MHz (16 ch) | 100 MHz ($\le 3$ ch), 20 MHz (16 ch) |
 | **On-Device RAM Depth** | 1 Gbit (128 MB) | 3.5 Gbit (448 MB) |
-| **Stream Bandwidth Cap** | 320 Mbps (~40 MB/s sustained) | 320 Mbps (~40 MB/s sustained) |
+| **Stream Bandwidth Cap** *(Experimental)* | 320 Mbps (~40 MB/s sustained) | 320 Mbps (~40 MB/s sustained) |
 | **Comparator Threshold** | -5.0 V to +5.0 V (100 mV step) | -5.0 V to +5.0 V (100 mV step) |
 | **Trigger Types** | Immediate, Rising, Falling, High, Low, Double Edge | Immediate, Rising, Falling, High, Low, Double Edge |
 
@@ -173,30 +173,40 @@ To connect the ATK-DL16 MCP server to Claude Desktop or Antigravity, add the fol
 
 ---
 
-## 6. Hardware-in-the-Loop (HIL) Test
+## 6. Test Architecture & Evidence Integrity
 
-An automated HIL test specification for **DK9 + TMS320F28P65** open-loop ePWM verification is provided in `tests/hil/dk9_openloop_pwm.yaml`.
+ATK-Logic-Mcp enforces strict, non-fakeable evidence validation across three distinct test tiers:
 
-Run the automated HIL test:
+```text
+tests/
+├── synthetic/       # Pure software simulated signals ([SYNTHETIC_PASS] / [SYNTHETIC_FAIL])
+├── golden/          # In-repo official reference capture regression ([GOLDEN_PASS])
+└── hil/             # Real hardware-in-the-loop validation (HIL_PASS / HIL_FAIL / HIL_NOT_RUN)
+```
+
+### 6.1 Strict HIL State Model
+The HIL runner (`tests/hil/run_dk9_hil.py`) will **never** fake a hardware pass with synthetic signals:
+- **`HIL_PASS`**: Real physical ATK-DL16 device detected, capture completed with verified Order 4 ACK, data integrity verified (`COMPLETE`), and all physical waveform assertions passed.
+- **`HIL_FAIL`**: Physical hardware capture completed, but physical assertions failed (e.g. shoot-through detected, frequency out of range).
+- **`HIL_NOT_RUN`**: Hardware is absent, busy, unready, or capture was aborted. Exits with clean diagnostics without masquerading as a test pass.
+
 ```powershell
+# Run HIL verification (safe on machines with or without connected hardware)
 python tests/hil/run_dk9_hil.py
 ```
-*Output:*
-```text
-=======================================================
-  DK9 HIL Test Result: PASS
-  Passed Assertions: 8
-  Failed Assertions: 0
-=======================================================
-  [+] Phase U Frequency: 20000.0 Hz (Target: 20000.0 Hz) - PASS
-  [+] Phase U Shoot-Through Protection: No Overlap - PASS
-  [+] Phase U Deadtime: 1000.0 ns (Allowed: 800.0-1200.0 ns) - PASS
-  [+] Phase V Shoot-Through Protection: No Overlap - PASS
-  [+] Phase V Deadtime: 1000.0 ns (Allowed: 800.0-1200.0 ns) - PASS
-  [+] Phase W Shoot-Through Protection: No Overlap - PASS
-  [+] Phase W Deadtime: 1000.0 ns (Allowed: 800.0-1200.0 ns) - PASS
-  [+] Three-Phase Balance: UV=120.0°, VW=120.0° - PASS
-=======================================================
+
+### 6.2 Fail-Closed Evidence Validation
+All MCP assertions (`logic_assert`) and capture workflows enforce fail-closed integrity:
+- **Order 4 Confirmation**: Captures require explicit confirmation (`CMD_SIMPLE_TRIGGER`, `status == 3`) before streaming begins.
+- **Data Integrity**: Incomplete captures, buffer underruns, or hardware capacity overflows immediately flag `data_integrity != "COMPLETE"` and return `passed: false`.
+- **Evidence Provenance**: All assertion results explicitly report their evidence source (`REAL_HARDWARE`, `GOLDEN_FILE`, or `SAVED_CAPTURE`).
+
+### 6.3 Self-Contained Golden Regression
+The repository archives an authentic ATK-DL16 capture fixture at `tests/golden/pwm_10M_30_25.atkdl` along with verified metadata, ensuring full regression testing without external clones or internet dependencies.
+
+```powershell
+# Run entire test suite (synthetic, golden, decoders, MCP)
+python -m pytest tests/ -v
 ```
 
 ---

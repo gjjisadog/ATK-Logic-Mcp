@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build-and-test:
+    name: Windows CI (C++ & Python)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build C++ Core and Test Suite
+        run: cmake --build build --config Release
+
+      - name: Run C++ Unit and Synthetic Tests (CTest)
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Run Python Synthetic, Golden, and MCP Tests
+        run: python -m pytest tests/ -v -s
+
+      - name: Verify HIL Runner Non-hardware Safety (HIL_NOT_RUN)
+        run: python tests/hil/run_dk9_hil.py

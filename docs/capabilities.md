@@ -44,7 +44,10 @@ In Buffer Mode, samples are captured directly into on-device high-speed SRAM/DRA
 | 500 MHz | 13 | **Unsupported** | 1 .. 16 |
 | 1 GHz | 14 | **Unsupported** | **1 .. 8 channels only** |
 
-### 2.2 Stream Mode (`mode == "stream"`)
+### 2.2 Stream Mode (`mode == "stream"`) [EXPERIMENTAL]
+
+> [!WARNING]
+> Stream mode is currently marked as **Experimental / Unverified on Hardware**. Buffer mode is the primary production mode for deterministic analysis and HIL verification.
 
 In Stream Mode, data flows continuously over USB Bulk IN to the host. The total aggregate bit rate must not exceed **320 Mbps** ($3.2 \times 10^8 \text{ bits/s}$), corresponding to ~40 MB/s of sustained USB bulk bandwidth:
 $$\text{Rate} \times \text{EnabledChannels} \le 320{,}000{,}000$$

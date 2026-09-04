@@ -91,3 +91,10 @@ When `Order 3` (`TriggerOffset`) arrives:
    - Discard the first $\lfloor \text{startOffset}_i / 8 \rfloor$ bytes.
    - Adjust bit index by $\text{startOffset}_i \pmod 8$.
    - The trigger event aligns deterministically at index $\text{TriggerSamplingDepth}$.
+
+### 3.4 Data Integrity & Order 4 ACK Verification
+To eliminate false-positive capture completions, the pipeline enforces fail-closed evidence validation:
+1. **Order 4 Trigger ACK**: After issuing `SimpleTrigger` (`0x12`), the driver blocks for `Order 4` (`status == 3`, `CMD_SIMPLE_TRIGGER`). Failure to receive this confirmation within 500ms aborts capture with `ErrorCode::ProtocolError`.
+2. **Order 6 Completion**: Buffer mode capture must terminate with a valid `Order 6` completion token from the hardware before finalizing.
+3. **Channel Completeness**: Each enabled channel must deliver $\ge 90\%$ of requested sample depth. Incomplete transfers flag `DataIntegrity::Incomplete` and return `ErrorCode::IncompleteCapture`.
+4. **Hardware Capacity Enforcement**: Captures exceeding hardware RAM (128 MB for DL16, 448 MB for DL16 Plus) fail immediately with `DataIntegrity::Overflow` rather than corrupting memory.
