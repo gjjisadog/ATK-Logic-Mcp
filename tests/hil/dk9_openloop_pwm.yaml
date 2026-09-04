@@ -28,7 +28,7 @@ assertions:
     target_hz: 16000.0       # 16 kHz TI F28P65 nominal ePWM carrier
     tolerance_hz: 100.0      # +/- 100 Hz
     max_jitter_rms_ns: 25.0  # ePWM clock jitter limit
-    max_carrier_offset_ns: 100.0 # Synchronous carrier alignment limit
+    max_carrier_freq_diff_hz: 50.0 # Carrier frequency consistency across phases
 
   duty_cycle:
     # OpenLoop Sinusoidal PWM: Duty is dynamic, not a fixed 50%
@@ -47,6 +47,7 @@ assertions:
 
   three_phase_modulation:
     fundamental_frequency_hz: 50.0 # 50 Hz inverter output
+    fundamental_tolerance_hz: 2.0  # +/- 2.0 Hz tolerance
     phase_shift_target_deg: 120.0  # 120-degree sinusoidal displacement
     phase_shift_tolerance_deg: 15.0
-    max_carrier_freq_diff_hz: 50.0
+    require_modulation_balance: true

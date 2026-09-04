@@ -32,7 +32,9 @@ class PwmMeasurement:
     low_time_mean_s: float
     jitter_peak_to_peak_ns: float
     jitter_rms_ns: float
-    valid: bool
+    measurement_valid: bool        # True if >= 5 valid cycles
+    anomaly_free: bool             # True if 0 missing pulses, extra edges, glitches, period outliers
+    valid: bool                    # measurement_valid and anomaly_free
     message: str
     warnings: List[str] = field(default_factory=list)
 
@@ -79,6 +81,7 @@ def analyze_pwm(
             period_mean_s=0.0, period_min_s=0.0, period_max_s=0.0,
             high_time_mean_s=0.0, low_time_mean_s=0.0,
             jitter_peak_to_peak_ns=0.0, jitter_rms_ns=0.0,
+            measurement_valid=False, anomaly_free=False,
             valid=False, message="Signal is static " + ("HIGH" if is_hi else "LOW"),
             warnings=warnings
         )
@@ -93,6 +96,7 @@ def analyze_pwm(
             period_mean_s=0.0, period_min_s=0.0, period_max_s=0.0,
             high_time_mean_s=0.0, low_time_mean_s=0.0,
             jitter_peak_to_peak_ns=0.0, jitter_rms_ns=0.0,
+            measurement_valid=False, anomaly_free=False,
             valid=False, message="Insufficient transitions (< 4 edges) to form full PWM cycles",
             warnings=warnings
         )
@@ -110,6 +114,7 @@ def analyze_pwm(
             period_mean_s=0.0, period_min_s=0.0, period_max_s=0.0,
             high_time_mean_s=0.0, low_time_mean_s=0.0,
             jitter_peak_to_peak_ns=0.0, jitter_rms_ns=0.0,
+            measurement_valid=False, anomaly_free=False,
             valid=False, message="Signal does not alternate both rising and falling edges",
             warnings=warnings
         )
@@ -127,6 +132,7 @@ def analyze_pwm(
             period_mean_s=0.0, period_min_s=0.0, period_max_s=0.0,
             high_time_mean_s=0.0, low_time_mean_s=0.0,
             jitter_peak_to_peak_ns=0.0, jitter_rms_ns=0.0,
+            measurement_valid=False, anomaly_free=False,
             valid=False, message="Invalid zero or negative nominal period",
             warnings=warnings
         )
@@ -200,6 +206,8 @@ def analyze_pwm(
             period_mean_s=0.0, period_min_s=0.0, period_max_s=0.0,
             high_time_mean_s=0.0, low_time_mean_s=0.0,
             jitter_peak_to_peak_ns=0.0, jitter_rms_ns=0.0,
+            measurement_valid=False,
+            anomaly_free=(missing_pulses == 0 and extra_edges == 0 and glitches == 0 and period_outliers == 0),
             valid=False,
             message=f"Insufficient valid cycles ({cycles_valid}/{cycles_total}). Missing pulses: {missing_pulses}, Extra edges: {extra_edges}",
             warnings=warnings
@@ -216,9 +224,11 @@ def analyze_pwm(
     jitter_ptp = float(np.ptp(period_jitter_ns))
     jitter_rms = float(np.std(period_jitter_ns))
 
-    # Strict validity check
-    is_valid = (missing_pulses == 0) and (cycles_valid >= 5) and (extra_edges == 0)
-    status_msg = "OK" if is_valid else f"ANOMALIES_DETECTED: missing={missing_pulses}, extra={extra_edges}, glitches={glitches}"
+    # Strict validity check: measurement_valid AND anomaly_free
+    measurement_valid = (cycles_valid >= 5)
+    anomaly_free = (missing_pulses == 0 and extra_edges == 0 and glitches == 0 and period_outliers == 0)
+    is_valid = measurement_valid and anomaly_free
+    status_msg = "OK" if is_valid else f"ANOMALIES_DETECTED: missing={missing_pulses}, extra={extra_edges}, glitches={glitches}, outliers={period_outliers}"
 
     return PwmMeasurement(
         channel=channel,
@@ -247,6 +257,8 @@ def analyze_pwm(
         low_time_mean_s=float(np.mean(lows_arr)),
         jitter_peak_to_peak_ns=jitter_ptp,
         jitter_rms_ns=jitter_rms,
+        measurement_valid=measurement_valid,
+        anomaly_free=anomaly_free,
         valid=is_valid,
         message=status_msg,
         warnings=warnings

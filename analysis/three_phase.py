@@ -12,9 +12,12 @@ class CarrierMetrics:
     carrier_frequency_w_hz: float
     carrier_frequency_mean_hz: float
     carrier_frequency_diff_max_hz: float
-    carrier_sync_offset_uv_ns: float
-    carrier_sync_offset_vw_ns: float
-    carrier_is_synchronized: bool
+    carrier_phase_status: str              # "NOT_MEASURED", "SYNCHRONIZED", "DESYNCHRONIZED", "INVALID_REFERENCE"
+    carrier_phase_offset_ns: Optional[float] = None
+    carrier_is_synchronized: Optional[bool] = None
+    carrier_sync_offset_uv_ns: Optional[float] = None
+    carrier_sync_offset_vw_ns: Optional[float] = None
+    carrier_jitter_rms_ns: float = 0.0
 
 
 @dataclass
@@ -60,18 +63,33 @@ def analyze_three_phase(
     u_channel: int = 0,
     v_channel: int = 1,
     w_channel: int = 2,
-    max_samples: Optional[int] = None
+    max_samples: Optional[int] = None,
+    carrier_ref_raw: Optional[bytes] = None
 ) -> ThreePhaseMeasurement:
     """
     Analyze 3-phase PWM system (U, V, W inverter legs) with physical separation of:
-      1. Carrier-Level: Switching frequency consistency, carrier synchronization (offset ~0ns).
-      2. Modulation-Level: Fundamental modulation envelope (sine 120 deg phase shift or balanced constant duty).
+      1. Carrier-Level: Switching frequency consistency across phases, optional carrier synchronization
+         against dedicated reference (e.g. EPWM11 / CarrierSync).
+      2. Modulation-Level: Fundamental modulation envelope (sine 120 deg phase shift or balanced constant duty),
+         extracted using per-channel edges to respect center-aligned symmetric PWM semantics.
     """
     pu = analyze_pwm(u_raw, sample_rate, u_channel, max_samples)
     pv = analyze_pwm(v_raw, sample_rate, v_channel, max_samples)
     pw = analyze_pwm(w_raw, sample_rate, w_channel, max_samples)
 
-    carrier_fallback = CarrierMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False)
+    carrier_fallback = CarrierMetrics(
+        carrier_frequency_u_hz=0.0,
+        carrier_frequency_v_hz=0.0,
+        carrier_frequency_w_hz=0.0,
+        carrier_frequency_mean_hz=0.0,
+        carrier_frequency_diff_max_hz=0.0,
+        carrier_phase_status="NOT_MEASURED" if carrier_ref_raw is None else "INVALID_REFERENCE",
+        carrier_phase_offset_ns=None,
+        carrier_is_synchronized=None if carrier_ref_raw is None else False,
+        carrier_sync_offset_uv_ns=None,
+        carrier_sync_offset_vw_ns=None,
+        carrier_jitter_rms_ns=0.0
+    )
     mod_fallback = ModulationMetrics(False, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False)
 
     if not (pu.valid and pv.valid and pw.valid):
@@ -86,31 +104,44 @@ def analyze_three_phase(
     freqs = [pu.frequency_mean_hz, pv.frequency_mean_hz, pw.frequency_mean_hz]
     freq_mean = float(np.mean(freqs))
     freq_diff_max = float(np.max(freqs) - np.min(freqs))
+    max_jitter_rms = float(max(pu.jitter_rms_ns, pv.jitter_rms_ns, pw.jitter_rms_ns))
 
-    # Extract rising edges to inspect carrier sync
-    _, u_edges, u_levels = extract_edges(u_raw, sample_rate, max_samples)
-    _, v_edges, v_levels = extract_edges(v_raw, sample_rate, max_samples)
-    _, w_edges, w_levels = extract_edges(w_raw, sample_rate, max_samples)
+    # Carrier phase sync:
+    # In center-aligned symmetric PWM (e.g. TI F28P65 Up-Down count), rising edges of U, V, W
+    # are modulated by CMPA/CMPB and inherently shift relative to each other even when
+    # time-base counters (TBCTR) are 100% synchronized.
+    # Therefore, carrier phase synchronization CANNOT be measured across output edges.
+    # It requires a dedicated carrier reference channel (e.g. EPWM11 / CarrierSync).
+    if carrier_ref_raw is not None:
+        _, ref_edges, ref_levels = extract_edges(carrier_ref_raw, sample_rate, max_samples)
+        ref_rise = ref_edges[ref_levels == 1]
+        if len(ref_rise) >= 5:
+            ref_periods = np.diff(ref_rise) / sample_rate
+            ref_freq = 1.0 / float(np.mean(ref_periods))
+            freq_match = abs(ref_freq - freq_mean) <= 0.02 * freq_mean
 
-    u_rise = u_edges[u_levels == 1]
-    v_rise = v_edges[v_levels == 1]
-    w_rise = w_edges[w_levels == 1]
+            _, u_edges_ref, u_levels_ref = extract_edges(u_raw, sample_rate, max_samples)
+            u_rise_ref = u_edges_ref[u_levels_ref == 1]
 
-    # Carrier offset: relative alignment between carriers
-    def compute_carrier_offset_ns(e1, e2):
-        offsets = []
-        for t1 in e1[:100]:
-            diffs = np.abs(e2.astype(np.int64) - t1)
-            if len(diffs) > 0:
-                min_diff = np.min(diffs)
-                offsets.append(min_diff / sample_rate * 1e9)
-        return float(np.median(offsets)) if offsets else 0.0
-
-    offset_uv_ns = compute_carrier_offset_ns(u_rise, v_rise)
-    offset_vw_ns = compute_carrier_offset_ns(v_rise, w_rise)
-    carrier_period_ns = (1.0 / freq_mean) * 1e9
-    # Synchronized if carrier offset is < 15% of switching period
-    carrier_sync = (offset_uv_ns < 0.15 * carrier_period_ns) and (freq_diff_max < 0.02 * freq_mean)
+            offsets = []
+            for r in ref_rise[:100]:
+                diffs = np.abs(u_rise_ref.astype(np.int64) - r)
+                if len(diffs) > 0:
+                    offsets.append(np.min(diffs) / sample_rate * 1e9)
+            med_offset_ns = float(np.median(offsets)) if offsets else 0.0
+            carrier_period_ns = (1.0 / freq_mean) * 1e9
+            is_synced = freq_match and (med_offset_ns < 0.15 * carrier_period_ns)
+            carrier_phase_status = "SYNCHRONIZED" if is_synced else "DESYNCHRONIZED"
+            carrier_is_synchronized = is_synced
+            carrier_phase_offset_ns = med_offset_ns
+        else:
+            carrier_phase_status = "INVALID_REFERENCE"
+            carrier_is_synchronized = False
+            carrier_phase_offset_ns = None
+    else:
+        carrier_phase_status = "NOT_MEASURED"
+        carrier_is_synchronized = None
+        carrier_phase_offset_ns = None
 
     carrier = CarrierMetrics(
         carrier_frequency_u_hz=pu.frequency_mean_hz,
@@ -118,40 +149,38 @@ def analyze_three_phase(
         carrier_frequency_w_hz=pw.frequency_mean_hz,
         carrier_frequency_mean_hz=freq_mean,
         carrier_frequency_diff_max_hz=freq_diff_max,
-        carrier_sync_offset_uv_ns=offset_uv_ns,
-        carrier_sync_offset_vw_ns=offset_vw_ns,
-        carrier_is_synchronized=carrier_sync
+        carrier_phase_status=carrier_phase_status,
+        carrier_phase_offset_ns=carrier_phase_offset_ns,
+        carrier_is_synchronized=carrier_is_synchronized,
+        carrier_sync_offset_uv_ns=None,
+        carrier_sync_offset_vw_ns=None,
+        carrier_jitter_rms_ns=max_jitter_rms
     )
 
     # 2. Modulation-level Analysis: Per-cycle Duty Envelopes
-    # Sample duty cycle over synchronous carrier periods
-    period_samples = sample_rate / freq_mean
-    n_cycles = min(len(u_rise), len(v_rise), len(w_rise)) - 1
+    # Extract duty cycles independently per phase using each channel's own rising and falling edges
+    _, u_edges, u_levels = extract_edges(u_raw, sample_rate, max_samples)
+    _, v_edges, v_levels = extract_edges(v_raw, sample_rate, max_samples)
+    _, w_edges, w_levels = extract_edges(w_raw, sample_rate, max_samples)
 
-    duties_u = []
-    duties_v = []
-    duties_w = []
+    def _extract_channel_duties(edges: np.ndarray, levels: np.ndarray) -> List[float]:
+        rises = edges[levels == 1]
+        falls = edges[levels == 0]
+        duties: List[float] = []
+        for i in range(len(rises) - 1):
+            r0 = rises[i]
+            r1 = rises[i + 1]
+            span = r1 - r0
+            if span <= 0:
+                continue
+            f_in = falls[(falls > r0) & (falls < r1)]
+            if len(f_in) == 1:
+                duties.append(float((f_in[0] - r0) / span))
+        return duties
 
-    for k in range(n_cycles):
-        t0 = u_rise[k]
-        t1 = u_rise[k + 1]
-        t_span = t1 - t0
-        if t_span <= 0: continue
-
-        # U high samples
-        u_falls = u_edges[(u_levels == 0) & (u_edges > t0) & (u_edges < t1)]
-        if len(u_falls) == 1:
-            duties_u.append((u_falls[0] - t0) / t_span)
-
-        # V high samples
-        v_falls = v_edges[(v_levels == 0) & (v_edges > t0) & (v_edges < t1)]
-        if len(v_falls) == 1:
-            duties_v.append((v_falls[0] - t0) / t_span)
-
-        # W high samples
-        w_falls = w_edges[(w_levels == 0) & (w_edges > t0) & (w_edges < t1)]
-        if len(w_falls) == 1:
-            duties_w.append((w_falls[0] - t0) / t_span)
+    duties_u = _extract_channel_duties(u_edges, u_levels)
+    duties_v = _extract_channel_duties(v_edges, v_levels)
+    duties_w = _extract_channel_duties(w_edges, w_levels)
 
     min_pts = min(len(duties_u), len(duties_v), len(duties_w))
     if min_pts < 10:
@@ -234,7 +263,8 @@ def analyze_three_phase(
             is_balanced=is_bal
         )
 
-    is_overall_valid = pu.valid and pv.valid and pw.valid and modulation.is_balanced
+    carrier_ok = (carrier_is_synchronized is not False)
+    is_overall_valid = pu.valid and pv.valid and pw.valid and modulation.is_balanced and carrier_ok
 
     return ThreePhaseMeasurement(
         u_channel=u_channel,

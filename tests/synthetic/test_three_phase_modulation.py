@@ -50,8 +50,9 @@ def test_synthetic_three_phase_sinusoidal_modulation():
 
     res = analyze_three_phase(u_b, v_b, w_b, sample_rate)
 
-    # 1. Carrier assertions: carriers MUST be synchronous (0 offset)
-    assert res.carrier.carrier_is_synchronized is True
+    # 1. Carrier assertions: carrier phase not measured across output edges (requires dedicated reference)
+    assert res.carrier.carrier_phase_status == "NOT_MEASURED"
+    assert res.carrier.carrier_is_synchronized is None
     assert abs(res.carrier.carrier_frequency_mean_hz - 16000.0) < 50.0
     assert res.carrier.carrier_frequency_diff_max_hz < 10.0
 
@@ -92,8 +93,46 @@ def test_synthetic_three_phase_constant_duty_diagnostic():
 
     res = analyze_three_phase(u_b, v_b, w_b, sample_rate)
 
-    assert res.carrier.carrier_is_synchronized is True
+    assert res.carrier.carrier_phase_status == "NOT_MEASURED"
+    assert res.carrier.carrier_is_synchronized is None
     assert res.modulation.is_constant_duty is True
     assert res.modulation.is_balanced is True
     assert res.valid is True
     print("[SYNTHETIC_PASS] Three-phase constant duty diagnostic mode verified")
+
+
+def test_synthetic_three_phase_with_carrier_reference():
+    """
+    Test 3-phase analysis with dedicated carrier reference channel (e.g. EPWM11 / CarrierSync).
+    Verifies that when carrier reference is provided, carrier_phase_status is 'SYNCHRONIZED'
+    and carrier_is_synchronized is True.
+    """
+    sample_rate = 10_000_000.0
+    f_sw = 16_000.0
+    period_samples = int(round(sample_rate / f_sw))
+    n_cycles = 50
+    total = period_samples * n_cycles
+
+    u_bits = np.zeros(total, dtype=np.uint8)
+    v_bits = np.zeros(total, dtype=np.uint8)
+    w_bits = np.zeros(total, dtype=np.uint8)
+    ref_bits = np.zeros(total, dtype=np.uint8)
+
+    for k in range(n_cycles):
+        base = k * period_samples
+        u_bits[base : base + period_samples // 2] = 1
+        v_bits[base : base + period_samples // 2] = 1
+        w_bits[base : base + period_samples // 2] = 1
+        # Dedicated sync reference pulse at carrier valley (start of period)
+        ref_bits[base : base + 10] = 1
+
+    u_b = np.packbits(u_bits, bitorder='little').tobytes()
+    v_b = np.packbits(v_bits, bitorder='little').tobytes()
+    w_b = np.packbits(w_bits, bitorder='little').tobytes()
+    ref_b = np.packbits(ref_bits, bitorder='little').tobytes()
+
+    res = analyze_three_phase(u_b, v_b, w_b, sample_rate, carrier_ref_raw=ref_b)
+    assert res.carrier.carrier_phase_status == "SYNCHRONIZED"
+    assert res.carrier.carrier_is_synchronized is True
+    assert res.valid is True
+    print("[SYNTHETIC_PASS] Three-phase with carrier reference channel verified")

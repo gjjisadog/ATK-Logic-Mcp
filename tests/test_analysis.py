@@ -118,7 +118,8 @@ def test_three_phase_analysis():
 
     res = analyze_three_phase(u_b, v_b, w_b, sample_rate)
     assert res.valid is True
-    assert res.carrier.carrier_is_synchronized is True
+    assert res.carrier.carrier_phase_status == "NOT_MEASURED"
+    assert res.carrier.carrier_is_synchronized is None
     assert res.modulation.is_balanced is True
 
 
