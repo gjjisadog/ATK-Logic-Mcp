@@ -101,6 +101,7 @@ def logic_status() -> Dict[str, Any]:
         is_busy = "in use" in err_msg or "claimed" in err_msg or "DeviceBusy" in err_msg
         return {
             "connected": True,
+            "ready": False,
             "is_busy": is_busy,
             "lock_owner": "ATK-Logic GUI or another process" if is_busy else "None",
             "message": err_msg
@@ -108,7 +109,7 @@ def logic_status() -> Dict[str, Any]:
 
     # Parse stdout of info
     lines = p_info.stdout.strip().split("\n")
-    info_dict = {"connected": True, "is_busy": False}
+    info_dict = {"connected": True, "ready": True, "is_busy": False}
     for line in lines:
         if ":" in line:
             k, v = line.split(":", 1)

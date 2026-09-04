@@ -1,7 +1,6 @@
 import sys
 import yaml
 import json
-import numpy as np
 from pathlib import Path
 
 # Add project root to path
@@ -11,147 +10,192 @@ sys.path.insert(0, str(ROOT_DIR))
 from atk_dl16_mcp.server import (
     logic_status,
     logic_capture,
-    logic_measure_pwm,
-    logic_measure_pair,
-    logic_measure_three_phase,
-    logic_assert
+    _load_capture_channel_bits
 )
 from analysis.pwm import analyze_pwm
 from analysis.complementary import analyze_complementary_pair
 from analysis.three_phase import analyze_three_phase
 
 
-def generate_synthetic_dk9_signals(spec: dict) -> dict:
-    """Generate deterministic synthetic F28P65 ePWM signals matching the DK9 spec."""
-    sr = float(spec["capture"]["sample_rate_hz"])
-    freq = float(spec["assertions"]["pwm_frequency"]["target_hz"])
-    period_samples = int(round(sr / freq))
-    n_cycles = 100
-    total_samples = period_samples * n_cycles
+def run_dk9_hil_test(yaml_path: str = "tests/hil/dk9_openloop_pwm.yaml", dry_run: bool = False) -> dict:
+    """
+    Execute DK9 Hardware-in-the-Loop (HIL) Test.
+    Strict State Model:
+      - HIL_PASS: Real DL16 connected + captured + data integrity PASS + all assertions PASS.
+      - HIL_FAIL: Real capture failed, incomplete/overflow, or any assertion failed.
+      - HIL_NOT_RUN: No hardware connected, hardware busy, or dry-run requested.
+    
+    NO SYNTHETIC FALLBACK ALLOWED.
+    """
+    config_file = Path(yaml_path)
+    if not config_file.is_absolute():
+        config_file = ROOT_DIR / yaml_path
 
-    # Deadband: 1000 ns = 100 samples at 100 MHz
-    dt_samples = int(round(1000.0 * 1e-9 * sr))
-    half_period = period_samples // 2
+    if not config_file.exists():
+        return {
+            "status": "HIL_FAIL",
+            "reason": f"HIL config file not found: {config_file}",
+            "evidence_source": "NONE",
+            "passed_assertions": 0,
+            "failed_assertions": 1,
+            "details": [],
+            "failures": [f"Config file missing: {config_file}"]
+        }
 
-    channels = {}
-    for phase_idx, (h_ch, l_ch) in enumerate([(0, 1), (2, 3), (4, 5)]):
-        phase_offset = int(round(phase_idx * (period_samples / 3.0)))
-
-        h_bits = np.zeros(total_samples, dtype=np.uint8)
-        l_bits = np.zeros(total_samples, dtype=np.uint8)
-
-        for c in range(n_cycles):
-            base = c * period_samples + phase_offset
-            # High side ON: from (base + dt) to (base + half_period)
-            h_start = (base + dt_samples) % total_samples
-            h_end = (base + half_period) % total_samples
-            if h_start < h_end:
-                h_bits[h_start:h_end] = 1
-
-            # Low side ON: from (base + half_period + dt) to (base + period_samples)
-            l_start = (base + half_period + dt_samples) % total_samples
-            l_end = (base + period_samples) % total_samples
-            if l_start < l_end:
-                l_bits[l_start:l_end] = 1
-
-        channels[h_ch] = np.packbits(h_bits, bitorder='little').tobytes()
-        channels[l_ch] = np.packbits(l_bits, bitorder='little').tobytes()
-
-    return channels
-
-
-def run_dk9_hil_test(yaml_path: str = "tests/hil/dk9_openloop_pwm.yaml") -> dict:
-    with open(yaml_path, "r") as f:
+    with open(config_file, "r") as f:
         spec = yaml.safe_load(f)
 
     report = {
-        "suite": spec["test_suite"],
-        "status": "PASS",
+        "suite": spec.get("test_suite", "DK9 HIL Test"),
+        "status": "HIL_NOT_RUN",
+        "evidence_source": "REAL_HARDWARE",
+        "reason": "",
         "passed_assertions": 0,
         "failed_assertions": 0,
         "details": [],
         "failures": []
     }
 
+    if dry_run or "--dry-run" in sys.argv:
+        report["status"] = "HIL_NOT_RUN"
+        report["reason"] = "Dry-run requested by user. Hardware capture skipped."
+        return report
+
     status = logic_status()
     report["hardware_status"] = status
 
+    # Check hardware presence and lock state
+    if not status.get("connected", False):
+        report["status"] = "HIL_NOT_RUN"
+        report["reason"] = "ATK-DL16 hardware not detected on USB bus."
+        return report
+
+    if status.get("is_busy", False):
+        report["status"] = "HIL_NOT_RUN"
+        report["reason"] = f"ATK-DL16 device is currently claimed by another application ({status.get('lock_owner', 'unknown')})."
+        return report
+
+    if not status.get("ready", False):
+        report["status"] = "HIL_NOT_RUN"
+        report["reason"] = f"ATK-DL16 device not ready for capture: {status.get('message', 'Device cannot be opened')}"
+        return report
+
+    # Hardware is ready, execute REAL physical capture
+    print(f"[HIL] Triggering physical capture on channels {spec['capture']['channels']}...")
+    cap_res = logic_capture(
+        channels=spec["capture"]["channels"],
+        sample_rate_hz=spec["capture"]["sample_rate_hz"],
+        duration_ms=spec["capture"]["duration_ms"],
+        threshold_voltage=spec["capture"]["threshold_voltage"],
+        trigger=spec["capture"].get("trigger", "immediate"),
+        mode=spec["capture"].get("mode", "buffer")
+    )
+
+    if not cap_res.get("success", False):
+        report["status"] = "HIL_FAIL"
+        report["reason"] = f"Hardware capture failed: {cap_res.get('error', 'unknown error')}"
+        report["failed_assertions"] += 1
+        report["failures"].append(report["reason"])
+        return report
+
+    # Verify Data Integrity of real capture
+    integrity = cap_res.get("data_integrity", "UNKNOWN")
+    if integrity not in ("COMPLETE", "PASS"):
+        report["status"] = "HIL_FAIL"
+        report["reason"] = f"Capture data integrity check failed: {integrity}"
+        report["failed_assertions"] += 1
+        report["failures"].append(report["reason"])
+        return report
+
+    cap_id = cap_res["capture_id"]
+    report["capture_id"] = cap_id
     sr = float(spec["capture"]["sample_rate_hz"])
 
-    # If real device is idle and available, capture directly; else use synthetic verified model
-    if status.get("connected") and not status.get("is_busy"):
-        print("[HIL] Live DL16 hardware detected and ready. Executing real capture...")
-        cap_res = logic_capture(
-            channels=spec["capture"]["channels"],
-            sample_rate_hz=spec["capture"]["sample_rate_hz"],
-            duration_ms=spec["capture"]["duration_ms"],
-            threshold_voltage=spec["capture"]["threshold_voltage"]
-        )
-        if not cap_res["success"]:
-            print(f"[HIL] Capture failed: {cap_res.get('error')}. Falling back to simulation.")
-            channels_raw = generate_synthetic_dk9_signals(spec)
-        else:
-            # Load real channels
-            from atk_dl16_mcp.server import _load_capture_channel_bits
-            channels_raw = {}
-            for ch in spec["capture"]["channels"]:
-                channels_raw[ch], _ = _load_capture_channel_bits(cap_res["capture_id"], ch)
-    else:
-        note = "Device is claimed by ATK-Logic GUI" if status.get("is_busy") else "No hardware connected"
-        print(f"[HIL] Hardware state: {note}. Running HIL verification on F28P65 synthetic model.")
-        channels_raw = generate_synthetic_dk9_signals(spec)
-
-    # 1. Assert Phase U PWM frequency & duty
-    meas_u = analyze_pwm(channels_raw[0], sr, channel=0)
-    target_f = spec["assertions"]["pwm_frequency"]["target_hz"]
-    tol_f = spec["assertions"]["pwm_frequency"]["tolerance_hz"]
-
-    if abs(meas_u.frequency_mean_hz - target_f) <= tol_f:
-        report["passed_assertions"] += 1
-        report["details"].append(f"Phase U Frequency: {meas_u.frequency_mean_hz:.1f} Hz (Target: {target_f} Hz) - PASS")
-    else:
+    # Load captured channel samples
+    channels_raw = {}
+    try:
+        for ch in spec["capture"]["channels"]:
+            channels_raw[ch], _ = _load_capture_channel_bits(cap_id, ch)
+    except Exception as ex:
+        report["status"] = "HIL_FAIL"
+        report["reason"] = f"Failed to load captured channel data: {ex}"
         report["failed_assertions"] += 1
-        report["failures"].append(f"Phase U Frequency {meas_u.frequency_mean_hz:.1f} Hz out of tolerance")
+        report["failures"].append(report["reason"])
+        return report
 
-    # 2. Assert Complementary Pairs (Phase U, Phase V, Phase W)
+    # Execute Assertions on Real Captured Waveforms
+    # 1. Switching Frequency & Duty Cycle Assertions
+    freq_spec = spec.get("assertions", {}).get("pwm_frequency", {})
+    target_f = freq_spec.get("target_hz")
+    tol_f = freq_spec.get("tolerance_hz", 100.0)
+
+    for ch in spec["capture"]["channels"]:
+        meas = analyze_pwm(channels_raw[ch], sr, channel=ch)
+        if not meas.valid:
+            report["failed_assertions"] += 1
+            report["failures"].append(f"Channel {ch} PWM analysis invalid: {meas.message}")
+            continue
+
+        if target_f is not None:
+            if abs(meas.frequency_mean_hz - target_f) <= tol_f:
+                report["passed_assertions"] += 1
+                report["details"].append(f"CH{ch} Frequency {meas.frequency_mean_hz:.1f} Hz matches target {target_f} Hz - PASS")
+            else:
+                report["failed_assertions"] += 1
+                report["failures"].append(f"CH{ch} Frequency {meas.frequency_mean_hz:.1f} Hz outside tolerance ({target_f} +/- {tol_f} Hz)")
+
+    # 2. Complementary Pair Assertions (Deadtime & Shoot-through)
+    dt_spec = spec.get("assertions", {}).get("deadtime", {})
+    min_dt = dt_spec.get("min_allowed_ns")
+    max_dt = dt_spec.get("max_allowed_ns")
+    st_spec = spec.get("assertions", {}).get("shoot_through_protection", {})
+    allow_overlap = st_spec.get("allow_overlap", False)
+
     for p_name, h_ch, l_ch in [("U", 0, 1), ("V", 2, 3), ("W", 4, 5)]:
-        pair = analyze_complementary_pair(channels_raw[h_ch], channels_raw[l_ch], sr, h_ch, l_ch)
-        min_dt = spec["assertions"]["deadtime"]["min_allowed_ns"]
-        max_dt = spec["assertions"]["deadtime"]["max_allowed_ns"]
+        if h_ch in channels_raw and l_ch in channels_raw:
+            pair = analyze_complementary_pair(channels_raw[h_ch], channels_raw[l_ch], sr, h_ch, l_ch)
+            if not pair.valid:
+                report["failed_assertions"] += 1
+                report["failures"].append(f"Phase {p_name} complementary analysis invalid: {pair.message}")
+                continue
 
-        # Shoot-through check
-        if not pair.has_overlap and not pair.shoot_through_risk:
+            if pair.has_overlap and not allow_overlap:
+                report["failed_assertions"] += 1
+                report["failures"].append(f"Phase {p_name} Shoot-Through Overlap detected! Count: {pair.overlap_count}")
+            else:
+                report["passed_assertions"] += 1
+                report["details"].append(f"Phase {p_name} Shoot-Through Protection: Zero Overlap - PASS")
+
+            if min_dt is not None and max_dt is not None:
+                if min_dt <= pair.deadtime_min_ns <= max_dt:
+                    report["passed_assertions"] += 1
+                    report["details"].append(f"Phase {p_name} Deadtime {pair.deadtime_min_ns:.1f} ns in range [{min_dt}, {max_dt}] ns - PASS")
+                else:
+                    report["failed_assertions"] += 1
+                    report["failures"].append(f"Phase {p_name} Deadtime {pair.deadtime_min_ns:.1f} ns outside [{min_dt}, {max_dt}] ns")
+
+    # 3. Three-Phase Modulation Balance Assertions
+    tri_spec = spec.get("assertions", {}).get("three_phase_balance", {})
+    if all(ch in channels_raw for ch in (0, 2, 4)) and tri_spec:
+        tri = analyze_three_phase(channels_raw[0], channels_raw[2], channels_raw[4], sr, 0, 2, 4)
+        if tri.is_balanced:
             report["passed_assertions"] += 1
-            report["details"].append(f"Phase {p_name} Shoot-Through Protection: No Overlap - PASS")
+            report["details"].append(f"Three-Phase Balance: UV={tri.phase_shift_uv_deg:.1f}°, VW={tri.phase_shift_vw_deg:.1f}° - PASS")
         else:
             report["failed_assertions"] += 1
-            report["failures"].append(f"Phase {p_name} Shoot-through risk detected! Overlap: {pair.overlap_count}")
+            report["failures"].append(f"Three-Phase Balance assertion failed: {tri.message}")
 
-        # Deadtime check
-        if min_dt <= pair.deadtime_min_ns <= max_dt:
-            report["passed_assertions"] += 1
-            report["details"].append(f"Phase {p_name} Deadtime: {pair.deadtime_min_ns:.1f} ns (Allowed: {min_dt}-{max_dt} ns) - PASS")
-        else:
-            report["failed_assertions"] += 1
-            report["failures"].append(f"Phase {p_name} Deadtime {pair.deadtime_min_ns:.1f} ns out of limits")
-
-    # 3. Assert Three-Phase Balance
-    tri = analyze_three_phase(channels_raw[0], channels_raw[2], channels_raw[4], sr, 0, 2, 4)
-    if tri.is_balanced:
-        report["passed_assertions"] += 1
-        report["details"].append(f"Three-Phase Balance: UV={tri.phase_shift_uv_deg:.1f}°, VW={tri.phase_shift_vw_deg:.1f}° - PASS")
-    else:
-        report["failed_assertions"] += 1
-        report["failures"].append("Three-Phase Balance failed: " + tri.message)
-
-    report["status"] = "PASS" if report["failed_assertions"] == 0 else "FAIL"
+    report["status"] = "HIL_PASS" if report["failed_assertions"] == 0 and report["passed_assertions"] > 0 else "HIL_FAIL"
     return report
 
 
 if __name__ == "__main__":
     rep = run_dk9_hil_test()
     print("\n=======================================================")
-    print(f"  DK9 HIL Test Result: {rep['status']}")
+    print(f"  DK9 HIL Execution Status: {rep['status']}")
+    if rep.get("reason"):
+        print(f"  Reason: {rep['reason']}")
+    print(f"  Evidence Source: {rep['evidence_source']}")
     print(f"  Passed Assertions: {rep['passed_assertions']}")
     print(f"  Failed Assertions: {rep['failed_assertions']}")
     print("=======================================================")
@@ -162,4 +206,10 @@ if __name__ == "__main__":
         for f in rep["failures"]:
             print(f"  [-] {f}")
     print("=======================================================\n")
-    sys.exit(0 if rep["status"] == "PASS" else 1)
+
+    if rep["status"] == "HIL_PASS":
+        sys.exit(0)
+    elif rep["status"] == "HIL_NOT_RUN":
+        sys.exit(0)  # Non-error skip for clean CI/environments without physical board
+    else:
+        sys.exit(1)
