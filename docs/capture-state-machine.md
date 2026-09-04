@@ -92,9 +92,10 @@ When `Order 3` (`TriggerOffset`) arrives:
    - Adjust bit index by $\text{startOffset}_i \pmod 8$.
    - The trigger event aligns deterministically at index $\text{TriggerSamplingDepth}$.
 
-### 3.4 Data Integrity & Order 4 ACK Verification
+### 3.4 Data Integrity & Unified RX Dispatch Contract
 To eliminate false-positive capture completions, the pipeline enforces fail-closed evidence validation:
-1. **Order 4 Trigger ACK**: After issuing `SimpleTrigger` (`0x12`), the driver blocks for `Order 4` (`status == 3`, `CMD_SIMPLE_TRIGGER`). Failure to receive this confirmation within 500ms aborts capture with `ErrorCode::ProtocolError`.
+1. **Unified RX Dispatch & Order 4 ACK**: After issuing `SimpleTrigger` (`0x12`), the driver enters a unified RX message dispatch loop. Non-ACK messages (`ChannelData`, `TriggerOffset`, `Progress`) that arrive before or interleaved with `Order 4` ACK are ingested into sample storage without data loss. Capture cannot complete unless `trigger_ack_received == true` (`status == 3`, `CMD_SIMPLE_TRIGGER`).
 2. **Order 6 Completion**: Buffer mode capture must terminate with a valid `Order 6` completion token from the hardware before finalizing.
-3. **Channel Completeness**: Each enabled channel must deliver $\ge 90\%$ of requested sample depth. Incomplete transfers flag `DataIntegrity::Incomplete` and return `ErrorCode::IncompleteCapture`.
+3. **100% Channel Completeness**: Every enabled channel must deliver 100% of the requested sample depth (`actual_samples >= requested_samples`). Any channel delivering fewer samples than requested flags `DataIntegrity::Incomplete` and fails closed with `ErrorCode::IncompleteCapture`.
 4. **Hardware Capacity Enforcement**: Captures exceeding hardware RAM (128 MB for DL16, 448 MB for DL16 Plus) fail immediately with `DataIntegrity::Overflow` rather than corrupting memory.
+5. **Artifact Provenance & Save Validation**: Artifact storage writes `evidence_source: "REAL_HARDWARE"` into `meta.json` and verifies that all files are written successfully. Failures flag `ErrorCode::ArtifactWriteError`.

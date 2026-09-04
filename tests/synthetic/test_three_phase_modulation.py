@@ -118,11 +118,14 @@ def test_synthetic_three_phase_with_carrier_reference():
     w_bits = np.zeros(total, dtype=np.uint8)
     ref_bits = np.zeros(total, dtype=np.uint8)
 
+    u_high = period_samples // 2
+    u_start = (period_samples - u_high) // 2
+
     for k in range(n_cycles):
         base = k * period_samples
-        u_bits[base : base + period_samples // 2] = 1
-        v_bits[base : base + period_samples // 2] = 1
-        w_bits[base : base + period_samples // 2] = 1
+        u_bits[base + u_start : base + u_start + u_high] = 1
+        v_bits[base + u_start : base + u_start + u_high] = 1
+        w_bits[base + u_start : base + u_start + u_high] = 1
         # Dedicated sync reference pulse at carrier valley (start of period)
         ref_bits[base : base + 10] = 1
 

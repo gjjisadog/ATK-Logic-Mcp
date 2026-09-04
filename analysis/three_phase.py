@@ -106,6 +106,11 @@ def analyze_three_phase(
     freq_diff_max = float(np.max(freqs) - np.min(freqs))
     max_jitter_rms = float(max(pu.jitter_rms_ns, pv.jitter_rms_ns, pw.jitter_rms_ns))
 
+    # Extract transitions upfront for carrier and modulation analysis
+    _, u_edges, u_levels = extract_edges(u_raw, sample_rate, max_samples)
+    _, v_edges, v_levels = extract_edges(v_raw, sample_rate, max_samples)
+    _, w_edges, w_levels = extract_edges(w_raw, sample_rate, max_samples)
+
     # Carrier phase sync:
     # In center-aligned symmetric PWM (e.g. TI F28P65 Up-Down count), rising edges of U, V, W
     # are modulated by CMPA/CMPB and inherently shift relative to each other even when
@@ -120,17 +125,32 @@ def analyze_three_phase(
             ref_freq = 1.0 / float(np.mean(ref_periods))
             freq_match = abs(ref_freq - freq_mean) <= 0.02 * freq_mean
 
-            _, u_edges_ref, u_levels_ref = extract_edges(u_raw, sample_rate, max_samples)
-            u_rise_ref = u_edges_ref[u_levels_ref == 1]
+            # Calculate pulse centers for phase U
+            # In center-aligned PWM, pulse center (t_rise + t_fall) / 2 is invariant to duty cycle
+            u_rises = u_edges[u_levels == 1]
+            u_falls = u_edges[u_levels == 0]
+            carrier_period_samples = sample_rate / freq_mean
+            carrier_period_ns = (1.0 / freq_mean) * 1e9
 
             offsets = []
             for r in ref_rise[:100]:
-                diffs = np.abs(u_rise_ref.astype(np.int64) - r)
-                if len(diffs) > 0:
-                    offsets.append(np.min(diffs) / sample_rate * 1e9)
+                r_u = u_rises[(u_rises >= r) & (u_rises < r + carrier_period_samples)]
+                if len(r_u) > 0:
+                    r0 = r_u[0]
+                    f_u = u_falls[(u_falls > r0) & (u_falls < r0 + carrier_period_samples)]
+                    if len(f_u) > 0:
+                        f0 = f_u[0]
+                        u_center = (r0 + f0) / 2.0
+                        diff_samples = (u_center - r) % carrier_period_samples
+                        dev_samples = min(
+                            diff_samples,
+                            abs(diff_samples - 0.5 * carrier_period_samples),
+                            abs(diff_samples - carrier_period_samples)
+                        )
+                        offsets.append(dev_samples / sample_rate * 1e9)
+
             med_offset_ns = float(np.median(offsets)) if offsets else 0.0
-            carrier_period_ns = (1.0 / freq_mean) * 1e9
-            is_synced = freq_match and (med_offset_ns < 0.15 * carrier_period_ns)
+            is_synced = freq_match and (med_offset_ns < 0.05 * carrier_period_ns)
             carrier_phase_status = "SYNCHRONIZED" if is_synced else "DESYNCHRONIZED"
             carrier_is_synchronized = is_synced
             carrier_phase_offset_ns = med_offset_ns
@@ -159,9 +179,6 @@ def analyze_three_phase(
 
     # 2. Modulation-level Analysis: Per-cycle Duty Envelopes
     # Extract duty cycles independently per phase using each channel's own rising and falling edges
-    _, u_edges, u_levels = extract_edges(u_raw, sample_rate, max_samples)
-    _, v_edges, v_levels = extract_edges(v_raw, sample_rate, max_samples)
-    _, w_edges, w_levels = extract_edges(w_raw, sample_rate, max_samples)
 
     def _extract_channel_duties(edges: np.ndarray, levels: np.ndarray) -> List[float]:
         rises = edges[levels == 1]

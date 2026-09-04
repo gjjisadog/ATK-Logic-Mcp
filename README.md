@@ -179,6 +179,7 @@ ATK-Logic-Mcp enforces strict, non-fakeable evidence validation across three dis
 
 ```text
 tests/
+├── contract/        # End-to-end mocked HIL & negative fail-closed contract tests
 ├── synthetic/       # Pure software simulated signals ([SYNTHETIC_PASS] / [SYNTHETIC_FAIL])
 ├── golden/          # In-repo official reference capture regression ([GOLDEN_PASS])
 └── hil/             # Real hardware-in-the-loop validation (HIL_PASS / HIL_FAIL / HIL_NOT_RUN)
@@ -186,20 +187,22 @@ tests/
 
 ### 6.1 Strict HIL State Model
 The HIL runner (`tests/hil/run_dk9_hil.py`) will **never** fake a hardware pass with synthetic signals:
-- **`HIL_PASS`**: Real physical ATK-DL16 device detected, capture completed with verified Order 4 ACK, data integrity verified (`COMPLETE`), and all physical waveform assertions passed.
-- **`HIL_FAIL`**: Physical hardware capture completed, but physical assertions failed (e.g. shoot-through detected, frequency out of range).
-- **`HIL_NOT_RUN`**: Hardware is absent, busy, unready, or capture was aborted. Exits with clean diagnostics without masquerading as a test pass.
+- **`HIL_PASS`**: Real physical ATK-DL16 device detected, capture completed with verified Order 4 ACK, 100% channel sample completeness (`actual_samples >= requested_samples`), data integrity verified (`COMPLETE`), and all physical waveform assertions passed.
+- **`HIL_FAIL`**: Physical hardware capture completed, but physical assertions failed (e.g. shoot-through detected, frequency out of range), or spec validation failed.
+- **`HIL_NOT_RUN`**: Hardware is absent, busy, unready, or capture was aborted. Exits with clean diagnostics (`evidence_source: NONE`) without masquerading as a test pass.
 
 ```powershell
 # Run HIL verification (safe on machines with or without connected hardware)
 python tests/hil/run_dk9_hil.py
 ```
 
-### 6.2 Fail-Closed Evidence Validation
-All MCP assertions (`logic_assert`) and capture workflows enforce fail-closed integrity:
-- **Order 4 Confirmation**: Captures require explicit confirmation (`CMD_SIMPLE_TRIGGER`, `status == 3`) before streaming begins.
-- **Data Integrity**: Incomplete captures, buffer underruns, or hardware capacity overflows immediately flag `data_integrity != "COMPLETE"` and return `passed: false`.
-- **Evidence Provenance**: All assertion results explicitly report their evidence source (`REAL_HARDWARE`, `GOLDEN_FILE`, or `SAVED_CAPTURE`).
+### 6.2 Fail-Closed Evidence Validation & PWM Semantics
+All MCP assertions (`logic_assert`), CLI `--json` output, and capture workflows enforce fail-closed integrity:
+- **Unified RX Dispatch**: After issuing `SimpleTrigger` (`0x12`), the capture engine ingests all RX messages (`ChannelData`, `TriggerOffset`, `Progress`) while verifying `Order 4` ACK (`status == 3`), preventing premature ACK race conditions and data loss.
+- **100% Channel Completeness**: Every channel must deliver 100% of requested depth. Incomplete captures immediately flag `data_integrity != "COMPLETE"`.
+- **Evidence Provenance**: All assertion results explicitly report their evidence source (`REAL_HARDWARE`, `GOLDEN_FILE`, or `SAVED_CAPTURE`). Uncertified files cannot masquerade as golden fixtures.
+- **Center-Aligned ePWM Physical Semantics**: In center-aligned symmetric PWM (e.g. TI TMS320F28P65 Up-Down count), output edge distance between phases shifts with duty cycle. Carrier phase is reported as `"NOT_MEASURED"` across output pins; carrier phase synchronization requires a dedicated reference channel (e.g. EPWM11 / CarrierSync).
+- **PWM Metrics Split**: Signal validity separates statistical readiness (`measurement_valid`, cycles $\ge 5$) from pulse integrity (`anomaly_free`, zero missing pulses, extra edges, glitches, or period outliers). `valid = measurement_valid and anomaly_free`.
 
 ### 6.3 Self-Contained Golden Regression
 The repository archives an authentic ATK-DL16 capture fixture at `tests/golden/pwm_10M_30_25.atkdl` along with verified metadata, ensuring full regression testing without external clones or internet dependencies.

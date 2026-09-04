@@ -86,3 +86,22 @@ $$\text{Rate} \times \text{EnabledChannels} \le 320{,}000{,}000$$
    - `low`
    - `double_edge` / `either`
 4. Pre-trigger position percentage must be between 0% and 100% (default 10% or 50%).
+
+---
+
+## 5. HIL Assertion Schema & DK9 PWM Physical Semantics
+
+### 5.1 Deterministic Assertion Schema
+Automated Hardware-in-the-Loop (HIL) testing enforces a strict schema under `tests/hil/dk9_openloop_pwm.yaml`:
+- **Allowed Keys**: `pwm_carrier`, `duty_cycle`, `deadtime`, `shoot_through_protection`, `three_phase_modulation`.
+- **Deprecated / Rejected Keys**: Old ambiguous keys (`pwm_frequency`, `three_phase_balance`) are rejected fail-closed with `HilSpecError`.
+- **Capture Mode**: Must be `buffer`. Stream mode captures are rejected for trusted HIL assertions.
+- **Complete Execution**: All declared assertions are tracked; if any declared assertion is unexecuted, the test fails closed with `HIL_FAIL`.
+
+### 5.2 Center-Aligned ePWM Physical Semantics
+In power electronics inverters (such as Hybrid30K driven by TI C2000 TMS320F28P65 in center-aligned Up-Down count mode):
+- **Output Edge Shifts**: Rising and falling edges on phases U, V, W are triggered by compare registers (`CMPA`/`CMPB`). As duty cycles vary dynamically or differ between phases, output edges shift inherently relative to each other even when time-base counters (`TBCTR`) are 100% phase-locked.
+- **Separation of Carrier Frequency and Phase**:
+  - Carrier switching frequencies ($f_{sw,U}, f_{sw,V}, f_{sw,W}$) and frequency consistency (`carrier_frequency_diff_max_hz`) are measurable from output pin transitions.
+  - Carrier phase synchronization is reported as `"NOT_MEASURED"` across output pins. It can only be evaluated when a dedicated hardware carrier reference channel (e.g. EPWM11 / CarrierSync pulsed at `TBCTR = 0`) is connected.
+- **Per-Channel Modulation Duty Extraction**: Duty cycle sequences are extracted independently for each phase using its own edges, avoiding cross-channel contamination.
