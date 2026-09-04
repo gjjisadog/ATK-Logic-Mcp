@@ -93,49 +93,7 @@ CaptureResult CaptureEngine::execute_capture(const CaptureConfig& config,
     std::vector<uint8_t> raw_buf(READ_TRANSFER_BUFFER_SIZE);
     std::vector<uint8_t> conv_buf(READ_TRANSFER_BUFFER_SIZE);
 
-    // Wait for SimpleTrigger confirmation (Order 4 ACK, command_code == 0x12, status == 3)
-    bool ack_confirmed = false;
-    auto arm_start = std::chrono::steady_clock::now();
-    while (std::chrono::steady_clock::now() - arm_start < std::chrono::milliseconds(1500)) {
-        size_t actual_len = 0;
-        err = m_device.transport().read_bulk(EP_BULK_IN, raw_buf.data(), raw_buf.size(), actual_len, 200);
-        if (err && actual_len >= USB_BLOCK_SIZE) {
-            size_t aligned_len = (actual_len / USB_BLOCK_SIZE) * USB_BLOCK_SIZE;
-            if (conv_buf.size() < aligned_len) conv_buf.resize(aligned_len);
-            convert_to_pc(raw_buf.data(), conv_buf.data(), aligned_len);
-            parser.push_bytes(conv_buf.data(), aligned_len);
-
-            while (parser.has_message()) {
-                auto msg_opt = parser.pop_message();
-                if (!msg_opt) break;
-                if (msg_opt->type == RxMessageType::Ack) {
-                    auto ack_opt = RxParser::parse_ack(*msg_opt);
-                    if (ack_opt && ack_opt->command_code == static_cast<uint8_t>(CommandCode::SimpleTrigger)) {
-                        if (ack_opt->status == 3) {
-                            ack_confirmed = true;
-                            result.trigger_ack_received = true;
-                            break;
-                        } else {
-                            m_state = CaptureState::Error;
-                            result.error_code = ErrorCode::ProtocolError;
-                            result.error_message = "SimpleTrigger ACK rejected by FPGA with status " + std::to_string(ack_opt->status);
-                            return result;
-                        }
-                    }
-                }
-            }
-            if (ack_confirmed) break;
-        }
-    }
-
-    if (!ack_confirmed) {
-        m_state = CaptureState::Error;
-        result.error_code = ErrorCode::ProtocolError;
-        result.error_message = "Timed out waiting for SimpleTrigger confirmation (Order 4 ACK status=3)";
-        return result;
-    }
-
-    // 6. CAPTURING State
+    // 6. CAPTURING State: Unified RX message dispatch loop
     m_state = CaptureState::Capturing;
 
     std::map<uint8_t, uint64_t> channel_start_offsets;
@@ -239,6 +197,17 @@ CaptureResult CaptureEngine::execute_capture(const CaptureConfig& config,
                         break;
                     }
                     case RxMessageType::Ack: {
+                        auto ack_opt = RxParser::parse_ack(msg);
+                        if (ack_opt && ack_opt->command_code == static_cast<uint8_t>(CommandCode::SimpleTrigger)) {
+                            if (ack_opt->status == 3) {
+                                result.trigger_ack_received = true;
+                            } else {
+                                m_state = CaptureState::Error;
+                                result.error_code = ErrorCode::ProtocolError;
+                                result.error_message = "SimpleTrigger ACK rejected by FPGA with status " + std::to_string(ack_opt->status);
+                                return result;
+                            }
+                        }
                         break;
                     }
                     case RxMessageType::Complete: {
@@ -260,6 +229,15 @@ CaptureResult CaptureEngine::execute_capture(const CaptureConfig& config,
         result.success = false;
         result.error_code = m_stop_requested ? ErrorCode::Ok : ErrorCode::CaptureTimeout;
         result.error_message = m_stop_requested ? "Capture was cancelled by user before completion" : "Capture timed out before Order 6 Complete received";
+        m_state = CaptureState::Error;
+        return result;
+    }
+
+    if (!result.trigger_ack_received) {
+        result.data_integrity = DataIntegrity::Incomplete;
+        result.success = false;
+        result.error_code = ErrorCode::ProtocolError;
+        result.error_message = "Capture completed without SimpleTrigger confirmation (Order 4 ACK)";
         m_state = CaptureState::Error;
         return result;
     }
@@ -300,10 +278,19 @@ CaptureResult CaptureEngine::execute_capture(const CaptureConfig& config,
     }
 
     result.data_integrity = DataIntegrity::Complete;
-    result.success = true;
     result.channel_edges = store.extract_all_edges();
 
-    store.save_to_directory(capture_dir, result.capture_id, &result);
+    bool save_ok = store.save_to_directory(capture_dir, result.capture_id, &result);
+    if (!save_ok) {
+        result.data_integrity = DataIntegrity::Incomplete;
+        result.success = false;
+        result.error_code = ErrorCode::ArtifactWriteError;
+        result.error_message = "Failed to write capture artifacts to directory: " + capture_dir;
+        m_state = CaptureState::Error;
+        return result;
+    }
+
+    result.success = true;
 
     m_state = CaptureState::DeviceReady;
     return result;

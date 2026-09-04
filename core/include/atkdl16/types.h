@@ -29,8 +29,35 @@ enum class ErrorCode {
     CapacityExceeded,
     BandwidthExceeded,
     IncompleteCapture,
-    AnalysisInvalid
+    AnalysisInvalid,
+    ArtifactWriteError
 };
+
+inline const char* to_string(ErrorCode code) {
+    switch (code) {
+        case ErrorCode::Ok: return "OK";
+        case ErrorCode::DeviceNotFound: return "DEVICE_NOT_FOUND";
+        case ErrorCode::DeviceBusy: return "DEVICE_BUSY";
+        case ErrorCode::UsbOpenFailed: return "USB_OPEN_FAILED";
+        case ErrorCode::UsbClaimFailed: return "USB_CLAIM_FAILED";
+        case ErrorCode::UsbTransferError: return "USB_TRANSFER_ERROR";
+        case ErrorCode::DeviceDisconnected: return "DEVICE_DISCONNECTED";
+        case ErrorCode::InvalidCaptureConfig: return "INVALID_CAPTURE_CONFIG";
+        case ErrorCode::UnsupportedSampleRate: return "UNSUPPORTED_SAMPLE_RATE";
+        case ErrorCode::UnsupportedChannelCombination: return "UNSUPPORTED_CHANNEL_COMBINATION";
+        case ErrorCode::UnsupportedTrigger: return "UNSUPPORTED_TRIGGER";
+        case ErrorCode::InvalidThreshold: return "INVALID_THRESHOLD";
+        case ErrorCode::RxDesync: return "RX_DESYNC";
+        case ErrorCode::ProtocolError: return "PROTOCOL_ERROR";
+        case ErrorCode::CaptureTimeout: return "CAPTURE_TIMEOUT";
+        case ErrorCode::CapacityExceeded: return "CAPACITY_EXCEEDED";
+        case ErrorCode::BandwidthExceeded: return "BANDWIDTH_EXCEEDED";
+        case ErrorCode::IncompleteCapture: return "INCOMPLETE_CAPTURE";
+        case ErrorCode::AnalysisInvalid: return "ANALYSIS_INVALID";
+        case ErrorCode::ArtifactWriteError: return "ARTIFACT_WRITE_ERROR";
+        default: return "UNKNOWN_ERROR";
+    }
+}
 
 struct Error {
     ErrorCode code{ErrorCode::Ok};

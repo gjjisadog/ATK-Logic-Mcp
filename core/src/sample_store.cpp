@@ -309,6 +309,7 @@ bool SampleStore::save_to_directory(const std::string& directory_path, const std
         meta_out << "  \"rle_enabled\": " << (m_config.enable_rle ? "true" : "false") << ",\n";
         meta_out << "  \"trigger_position_percent\": " << m_config.trigger.position_percent << ",\n";
         if (result) {
+            meta_out << "  \"evidence_source\": \"REAL_HARDWARE\",\n";
             meta_out << "  \"data_integrity\": \"" << to_string(result->data_integrity) << "\",\n";
             meta_out << "  \"requested_samples\": " << result->requested_samples << ",\n";
             meta_out << "  \"actual_samples\": " << result->actual_samples << ",\n";

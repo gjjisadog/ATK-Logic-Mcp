@@ -33,6 +33,23 @@ def _find_cli() -> Optional[Path]:
     return None
 
 
+def _is_certified_golden(cap_path: Path) -> bool:
+    """Verify that file is an authenticated golden reference fixture with matching manifest."""
+    try:
+        resolved = cap_path.resolve()
+        golden_dir = (ROOT_DIR / "tests" / "golden").resolve()
+        if golden_dir in resolved.parents or resolved.parent == golden_dir:
+            meta_json = resolved.parent / f"{resolved.stem}_meta.json"
+            if meta_json.exists():
+                with open(meta_json, "r") as f:
+                    manifest = json.load(f)
+                    if manifest.get("archive_filename") == resolved.name:
+                        return True
+    except Exception:
+        pass
+    return False
+
+
 def _load_capture_channel_bits(capture_id: str, channel: int) -> tuple[bytes, dict]:
     """Helper to load channel raw bits and meta from capture directory or .atkdl archive."""
     cap_path = Path(capture_id)
@@ -68,24 +85,35 @@ def _load_capture_channel_bits(capture_id: str, channel: int) -> tuple[bytes, di
                             set_time_ms = parsed.get("setTime")
                         except Exception:
                             pass
-            if sr is None:
-                raise ValueError(f"Cannot determine sample rate from {cap_path.name}: missing setHz in set.ini")
+            if sr is None or float(sr) <= 0:
+                raise ValueError(f"ANALYSIS_INVALID: cannot determine valid sample rate from {cap_path.name}: missing setHz in set.ini")
+
+            sr = float(sr)
+            is_golden = _is_certified_golden(cap_path)
 
             if set_time_ms and set_time_ms > 0:
                 expected_samples = int(sr * (set_time_ms / 1000.0))
                 expected_bytes = (expected_samples + 7) // 8
-                if len(raw_bytes) > expected_bytes:
-                    raw_bytes = raw_bytes[:expected_bytes]
                 duration_ms = int(set_time_ms)
+                if len(raw_bytes) < expected_bytes:
+                    data_integrity = "INCOMPLETE"
+                elif len(raw_bytes) == expected_bytes:
+                    data_integrity = "COMPLETE"
+                else:  # len(raw_bytes) > expected_bytes
+                    if is_golden:
+                        raw_bytes = raw_bytes[:expected_bytes]
+                        data_integrity = "COMPLETE"
+                    else:
+                        data_integrity = "UNKNOWN"
             else:
                 duration_ms = int((len(raw_bytes) * 8 / sr) * 1000)
+                data_integrity = "UNKNOWN"
 
-            is_golden = "golden" in str(cap_path).lower()
             meta = {
                 "sample_rate": sr,
                 "duration_ms": duration_ms,
                 "mode": "buffer",
-                "data_integrity": "COMPLETE",
+                "data_integrity": data_integrity,
                 "evidence_source": "GOLDEN_FILE" if is_golden else "SAVED_CAPTURE"
             }
             return raw_bytes, meta
@@ -98,8 +126,15 @@ def _load_capture_channel_bits(capture_id: str, channel: int) -> tuple[bytes, di
     with open(meta_file, "r") as f:
         meta = json.load(f)
 
-    meta.setdefault("data_integrity", "COMPLETE")
-    meta.setdefault("evidence_source", "REAL_HARDWARE")
+    # Delete fail-open defaults (Section 10)
+    data_integrity = meta.get("data_integrity", "UNKNOWN")
+    evidence_source = meta.get("evidence_source", "UNKNOWN")
+
+    # Sample rate must be valid (Section 11)
+    sr = meta.get("sample_rate")
+    if sr is None or float(sr) <= 0:
+        raise ValueError(f"ANALYSIS_INVALID: capture {capture_id} missing or invalid sample_rate")
+    sample_rate = float(sr)
 
     ch_file = cap_path / f"ch{channel:02d}.bits"
     if not ch_file.exists():
@@ -107,6 +142,21 @@ def _load_capture_channel_bits(capture_id: str, channel: int) -> tuple[bytes, di
 
     with open(ch_file, "rb") as f:
         raw_bytes = f.read()
+
+    # Section 12: Check actual file bits against metadata sample counts
+    actual_file_bits = len(raw_bytes) * 8
+    channel_counts = meta.get("sample_counts", {})
+    expected_ch_samples = channel_counts.get(str(channel))
+    if expected_ch_samples is not None and actual_file_bits < expected_ch_samples:
+        data_integrity = "ARTIFACT_INCOMPLETE"
+    elif meta.get("actual_samples") is not None and actual_file_bits < meta["actual_samples"]:
+        data_integrity = "ARTIFACT_INCOMPLETE"
+    elif meta.get("requested_samples") is not None and actual_file_bits < meta["requested_samples"]:
+        data_integrity = "ARTIFACT_INCOMPLETE"
+
+    meta["data_integrity"] = data_integrity
+    meta["evidence_source"] = evidence_source
+    meta["sample_rate"] = sample_rate
 
     return raw_bytes, meta
 
@@ -165,17 +215,19 @@ def logic_capture(
 ) -> Dict[str, Any]:
     """
     Perform a logic capture on specified channels and save waveforms to disk.
-    Args:
-        channels: List of channel indices to acquire (0..15)
-        sample_rate_hz: Sample frequency in Hz (e.g. 1000000, 20000000, 100000000)
-        duration_ms: Total capture duration in milliseconds
-        threshold_voltage: Comparator threshold voltage in Volts (-5.0 to +5.0)
-        trigger: Trigger condition (e.g. 'immediate', 'ch0:rising', 'ch0:falling')
-        mode: Capture mode ('buffer' or 'stream')
+    Propagates complete machine-readable evidence contract via CLI --json flag.
     """
     cli = _find_cli()
     if not cli:
-        return {"success": False, "error": "CLI executable atk-dl16.exe not found"}
+        return {
+            "success": False,
+            "error_code": "CLI_NOT_FOUND",
+            "message": "CLI executable atk-dl16.exe not found",
+            "evidence_source": "REAL_HARDWARE",
+            "data_integrity": "UNKNOWN",
+            "capture_complete_received": False,
+            "warnings": []
+        }
 
     ch_str = ",".join(str(c) for c in channels)
     out_dir = str(ROOT_DIR / "captures")
@@ -188,35 +240,25 @@ def logic_capture(
         "--threshold", str(threshold_voltage),
         "--trigger", trigger,
         "--mode", mode,
-        "--out", out_dir
+        "--out", out_dir,
+        "--json"
     ]
 
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
+    try:
+        data = json.loads(proc.stdout)
+        return data
+    except Exception as ex:
         return {
             "success": False,
-            "error": proc.stderr.strip() or proc.stdout.strip(),
-            "raw_output": proc.stdout
+            "error_code": "CLI_JSON_PARSE_ERROR",
+            "message": f"Failed to parse JSON from CLI stdout: {ex}",
+            "evidence_source": "REAL_HARDWARE",
+            "data_integrity": "UNKNOWN",
+            "capture_complete_received": False,
+            "raw_stdout": proc.stdout,
+            "warnings": [proc.stderr.strip()] if proc.stderr.strip() else []
         }
-
-    # Parse capture_id from stdout
-    cap_id = None
-    samples = None
-    for line in proc.stdout.split("\n"):
-        if "capture_id:" in line:
-            cap_id = line.split("capture_id:")[1].strip()
-        elif "samples:" in line:
-            samples = int(line.split("samples:")[1].strip())
-
-    return {
-        "success": True,
-        "capture_id": cap_id,
-        "actual_samples": samples,
-        "channels": channels,
-        "sample_rate_hz": sample_rate_hz,
-        "duration_ms": duration_ms,
-        "artifact_dir": str(Path(out_dir) / cap_id) if cap_id else out_dir
-    }
 
 
 @server.tool()
@@ -228,14 +270,9 @@ def logic_measure_pwm(
 ) -> Dict[str, Any]:
     """
     Compute cycle-by-cycle frequency, duty cycle, jitter, and glitch metrics for a PWM channel.
-    Args:
-        capture_id: ID of a previous capture (or path to a .atkdl file)
-        channel: Channel index to analyze (0..15)
-        glitch_threshold_ns: Glitch detection pulse width threshold in nanoseconds
-        max_samples: Optional limit on sample count to analyze
     """
     raw_bytes, meta = _load_capture_channel_bits(capture_id, channel)
-    sample_rate = float(meta.get("sample_rate", 20_000_000))
+    sample_rate = float(meta["sample_rate"])
 
     meas = analyze_pwm(
         raw_bytes=raw_bytes,
@@ -244,7 +281,16 @@ def logic_measure_pwm(
         max_samples=max_samples,
         glitch_threshold_ns=glitch_threshold_ns
     )
-    return meas.to_dict()
+    res = {
+        "capture_id": capture_id,
+        "evidence_source": meta.get("evidence_source", "UNKNOWN"),
+        "data_integrity": meta.get("data_integrity", "UNKNOWN"),
+        "mode": meta.get("mode", "buffer"),
+        "sample_rate": sample_rate,
+        "measurement": meas.to_dict()
+    }
+    res.update(meas.to_dict())
+    return res
 
 
 @server.tool()
@@ -257,15 +303,10 @@ def logic_measure_pair(
     """
     Analyze a complementary PWM half-bridge pair (e.g. EPWMxA and EPWMxB).
     Measures deadtime, shoot-through risk, and overlap intervals.
-    Args:
-        capture_id: Capture ID or .atkdl file path
-        high_channel: High-side switch channel index
-        low_channel: Low-side switch channel index
-        max_samples: Optional limit on samples to analyze
     """
     h_bytes, meta = _load_capture_channel_bits(capture_id, high_channel)
     l_bytes, _ = _load_capture_channel_bits(capture_id, low_channel)
-    sample_rate = float(meta.get("sample_rate", 20_000_000))
+    sample_rate = float(meta["sample_rate"])
 
     meas = analyze_complementary_pair(
         high_raw_bytes=h_bytes,
@@ -275,7 +316,16 @@ def logic_measure_pair(
         low_channel=low_channel,
         max_samples=max_samples
     )
-    return meas.to_dict()
+    res = {
+        "capture_id": capture_id,
+        "evidence_source": meta.get("evidence_source", "UNKNOWN"),
+        "data_integrity": meta.get("data_integrity", "UNKNOWN"),
+        "mode": meta.get("mode", "buffer"),
+        "sample_rate": sample_rate,
+        "measurement": meas.to_dict()
+    }
+    res.update(meas.to_dict())
+    return res
 
 
 @server.tool()
@@ -288,12 +338,12 @@ def logic_measure_three_phase(
 ) -> Dict[str, Any]:
     """
     Analyze a 3-phase PWM system (U, V, W legs).
-    Measures phase shifts (target 120 degrees), frequency uniformity, and balance.
+    Measures fundamental modulation frequency, phase shifts, and symmetry.
     """
     u_bytes, meta = _load_capture_channel_bits(capture_id, u_channel)
     v_bytes, _ = _load_capture_channel_bits(capture_id, v_channel)
     w_bytes, _ = _load_capture_channel_bits(capture_id, w_channel)
-    sample_rate = float(meta.get("sample_rate", 20_000_000))
+    sample_rate = float(meta["sample_rate"])
 
     meas = analyze_three_phase(
         u_raw=u_bytes,
@@ -305,7 +355,16 @@ def logic_measure_three_phase(
         w_channel=w_channel,
         max_samples=max_samples
     )
-    return meas.to_dict()
+    res = {
+        "capture_id": capture_id,
+        "evidence_source": meta.get("evidence_source", "UNKNOWN"),
+        "data_integrity": meta.get("data_integrity", "UNKNOWN"),
+        "mode": meta.get("mode", "buffer"),
+        "sample_rate": sample_rate,
+        "measurement": meas.to_dict()
+    }
+    res.update(meas.to_dict())
+    return res
 
 
 @server.tool()
@@ -319,7 +378,7 @@ def logic_inspect(
     Inspect raw transition edges and signal levels for a channel in a capture.
     """
     raw_bytes, meta = _load_capture_channel_bits(capture_id, channel)
-    sample_rate = float(meta.get("sample_rate", 20_000_000))
+    sample_rate = float(meta["sample_rate"])
 
     init_lvl, edges, levels = extract_edges(raw_bytes, sample_rate)
 
@@ -336,7 +395,7 @@ def logic_inspect(
             "level": int(lvl)
         })
 
-    return {
+    meas = {
         "channel": channel,
         "sample_rate": sample_rate,
         "total_edges": len(edges),
@@ -345,6 +404,16 @@ def logic_inspect(
         "returned_edges_count": len(edge_list),
         "edges": edge_list
     }
+    res = {
+        "capture_id": capture_id,
+        "evidence_source": meta.get("evidence_source", "UNKNOWN"),
+        "data_integrity": meta.get("data_integrity", "UNKNOWN"),
+        "mode": meta.get("mode", "buffer"),
+        "sample_rate": sample_rate,
+        "measurement": meas
+    }
+    res.update(meas)
+    return res
 
 
 @server.tool()
@@ -364,12 +433,49 @@ def logic_assert(
     Automated HIL testing assertion evaluator.
     Validates PWM signals and complementary switching pairs against design tolerances.
     """
-    raw_bytes, meta = _load_capture_channel_bits(capture_id, channel)
-    sample_rate = float(meta.get("sample_rate", 20_000_000))
+    try:
+        raw_bytes, meta = _load_capture_channel_bits(capture_id, channel)
+    except Exception as ex:
+        return {
+            "passed": False,
+            "reason": f"LOAD_ERROR: {ex}",
+            "evidence_source": "UNKNOWN",
+            "data_integrity": "UNKNOWN",
+            "failures": [str(ex)],
+            "pwm_summary": None,
+            "pair_summary": None
+        }
+
+    sample_rate = meta.get("sample_rate")
+    if sample_rate is None or float(sample_rate) <= 0:
+        return {
+            "passed": False,
+            "reason": "ANALYSIS_INVALID: missing or invalid sample_rate",
+            "evidence_source": meta.get("evidence_source", "UNKNOWN"),
+            "data_integrity": meta.get("data_integrity", "UNKNOWN"),
+            "failures": ["Sample rate is missing or invalid"],
+            "pwm_summary": None,
+            "pair_summary": None
+        }
+    sample_rate = float(sample_rate)
+
     integrity = meta.get("data_integrity", "UNKNOWN")
     evidence_source = meta.get("evidence_source", "UNKNOWN")
+    mode = meta.get("mode", "buffer")
 
-    # Fail closed on capture data integrity
+    # Section 33: Stream mode fail closed in logic_assert
+    if mode != "buffer":
+        return {
+            "passed": False,
+            "reason": f"EXPERIMENTAL_CAPTURE_MODE: mode '{mode}' is unverified on hardware",
+            "evidence_source": evidence_source,
+            "data_integrity": integrity,
+            "failures": [f"Capture mode '{mode}' is experimental and rejected for trusted assertions"],
+            "pwm_summary": None,
+            "pair_summary": None
+        }
+
+    # Section 10: Fail closed on capture data integrity
     if integrity not in ("COMPLETE", "PASS"):
         return {
             "passed": False,
@@ -377,6 +483,18 @@ def logic_assert(
             "evidence_source": evidence_source,
             "data_integrity": integrity,
             "failures": [f"Capture data is incomplete or corrupted ({integrity})"],
+            "pwm_summary": None,
+            "pair_summary": None
+        }
+
+    # Fail closed on untrusted evidence source
+    if evidence_source in ("UNKNOWN", "NONE"):
+        return {
+            "passed": False,
+            "reason": f"UNTRUSTED_EVIDENCE_SOURCE: evidence source is {evidence_source}",
+            "evidence_source": evidence_source,
+            "data_integrity": integrity,
+            "failures": [f"Evidence source {evidence_source} is untrusted"],
             "pwm_summary": None,
             "pair_summary": None
         }

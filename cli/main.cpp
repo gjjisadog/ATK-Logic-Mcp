@@ -88,7 +88,8 @@ static void print_usage() {
               << "  --threshold <voltage>         Comparator threshold voltage (e.g. 1.6, default: 1.6)\n"
               << "  --mode <buffer|stream>        Capture mode (buffer = standard, stream = experimental, default: buffer)\n"
               << "  --trigger <ch:edge>           Trigger spec (e.g. ch0:rising, immediate, default: immediate)\n"
-              << "  --out <dir>                   Output directory for captures (default: captures)\n";
+              << "  --out <dir>                   Output directory for captures (default: captures)\n"
+              << "  --json                        Output machine-readable JSON to stdout (default: off)\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -132,10 +133,13 @@ int main(int argc, char* argv[]) {
     if (cmd == "capture") {
         CaptureConfig config;
         std::string out_dir = "captures";
+        bool json_mode = false;
 
         for (int i = 2; i < argc; ++i) {
             std::string arg = argv[i];
-            if (arg == "--channels" && i + 1 < argc) {
+            if (arg == "--json") {
+                json_mode = true;
+            } else if (arg == "--channels" && i + 1 < argc) {
                 config.enabled_channels = parse_channels(argv[++i]);
             } else if (arg == "--sample-rate" && i + 1 < argc) {
                 config.sample_rate = parse_rate_string(argv[++i]);
@@ -156,21 +160,91 @@ int main(int argc, char* argv[]) {
         Device dev;
         auto err = dev.open();
         if (!err) {
-            std::cerr << "Failed to open device: " << err.message << "\n";
+            if (json_mode) {
+                std::cout << "{\n"
+                          << "  \"success\": false,\n"
+                          << "  \"error_code\": \"" << to_string(err.code) << "\",\n"
+                          << "  \"message\": \"" << err.message << "\",\n"
+                          << "  \"evidence_source\": \"REAL_HARDWARE\",\n"
+                          << "  \"data_integrity\": \"UNKNOWN\",\n"
+                          << "  \"capture_complete_received\": false,\n"
+                          << "  \"warnings\": []\n"
+                          << "}\n";
+            } else {
+                std::cerr << "Failed to open device: " << err.message << "\n";
+            }
             return 1;
         }
 
         CaptureEngine engine(dev);
-        std::cout << "Starting capture: " << (config.sample_rate / 1'000'000.0) << " MHz, "
-                  << config.duration_ms << " ms, " << config.enabled_channels.size() << " channels...\n";
+        if (!json_mode) {
+            std::cout << "Starting capture: " << (config.sample_rate / 1'000'000.0) << " MHz, "
+                      << config.duration_ms << " ms, " << config.enabled_channels.size() << " channels...\n";
+        }
 
         auto result = engine.execute_capture(
             config, out_dir,
-            [](uint64_t cur, uint64_t total, uint8_t pct) {
-                std::cout << "\rProgress: " << static_cast<int>(pct) << "% (" << cur << "/" << total << " samples)" << std::flush;
+            [json_mode](uint64_t cur, uint64_t total, uint8_t pct) {
+                if (!json_mode) {
+                    std::cout << "\rProgress: " << static_cast<int>(pct) << "% (" << cur << "/" << total << " samples)" << std::flush;
+                } else {
+                    std::cerr << "\rProgress: " << static_cast<int>(pct) << "% (" << cur << "/" << total << " samples)" << std::flush;
+                }
             }
         );
-        std::cout << "\n";
+        if (!json_mode) {
+            std::cout << "\n";
+        } else {
+            std::cerr << "\n";
+        }
+
+        if (json_mode) {
+            if (!result.success) {
+                std::cout << "{\n"
+                          << "  \"success\": false,\n"
+                          << "  \"error_code\": \"" << to_string(result.error_code) << "\",\n"
+                          << "  \"message\": \"" << result.error_message << "\",\n"
+                          << "  \"evidence_source\": \"REAL_HARDWARE\",\n"
+                          << "  \"data_integrity\": \"" << to_string(result.data_integrity) << "\",\n"
+                          << "  \"capture_complete_received\": " << (result.capture_complete_received ? "true" : "false") << ",\n"
+                          << "  \"warnings\": [";
+                for (size_t i = 0; i < result.warnings.size(); ++i) {
+                    std::cout << "\"" << result.warnings[i] << "\"";
+                    if (i + 1 < result.warnings.size()) std::cout << ", ";
+                }
+                std::cout << "]\n}\n";
+                return 1;
+            } else {
+                std::cout << "{\n"
+                          << "  \"success\": true,\n"
+                          << "  \"capture_id\": \"" << result.capture_id << "\",\n"
+                          << "  \"evidence_source\": \"REAL_HARDWARE\",\n"
+                          << "  \"data_integrity\": \"" << to_string(result.data_integrity) << "\",\n"
+                          << "  \"requested_samples\": " << result.requested_samples << ",\n"
+                          << "  \"minimum_actual_samples\": " << result.minimum_actual_samples << ",\n"
+                          << "  \"actual_samples_per_channel\": {\n";
+                bool first_ch = true;
+                for (const auto& [ch, cnt] : result.actual_samples_per_channel) {
+                    if (!first_ch) std::cout << ",\n";
+                    first_ch = false;
+                    std::cout << "    \"" << static_cast<int>(ch) << "\": " << cnt;
+                }
+                std::cout << "\n  },\n"
+                          << "  \"trigger_ack_received\": " << (result.trigger_ack_received ? "true" : "false") << ",\n"
+                          << "  \"trigger_offset_received\": " << (result.trigger_offset_received ? "true" : "false") << ",\n"
+                          << "  \"capture_complete_received\": " << (result.capture_complete_received ? "true" : "false") << ",\n"
+                          << "  \"capacity_exceeded\": " << (result.capacity_exceeded ? "true" : "false") << ",\n"
+                          << "  \"bandwidth_exceeded\": " << (result.bandwidth_exceeded ? "true" : "false") << ",\n"
+                          << "  \"artifact_dir\": \"" << out_dir << "/" << result.capture_id << "\",\n"
+                          << "  \"warnings\": [";
+                for (size_t i = 0; i < result.warnings.size(); ++i) {
+                    std::cout << "\"" << result.warnings[i] << "\"";
+                    if (i + 1 < result.warnings.size()) std::cout << ", ";
+                }
+                std::cout << "]\n}\n";
+                return 0;
+            }
+        }
 
         if (!result.success) {
             std::cerr << "Capture failed: " << result.error_message << "\n";
