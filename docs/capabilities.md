@@ -104,4 +104,16 @@ In power electronics inverters (such as Hybrid30K driven by TI C2000 TMS320F28P6
 - **Separation of Carrier Frequency and Phase**:
   - Carrier switching frequencies ($f_{sw,U}, f_{sw,V}, f_{sw,W}$) and frequency consistency (`carrier_frequency_diff_max_hz`) are measurable from output pin transitions.
   - Carrier phase synchronization is reported as `"NOT_MEASURED"` across output pins. It can only be evaluated when a dedicated hardware carrier reference channel (e.g. EPWM11 / CarrierSync pulsed at `TBCTR = 0`) is connected.
+- **Output-Edge Period Variation RMS**: Under dynamic sinusoidal modulation, period jitter measured on output pins reflects switching edge variation under modulation (`max_output_edge_period_variation_rms_ns`), distinct from internal oscillator clock jitter.
 - **Per-Channel Modulation Duty Extraction**: Duty cycle sequences are extracted independently for each phase using its own edges, avoiding cross-channel contamination.
+- **Directed Phase Sequence Contract**: Modulation envelopes must verify directed phase sequence (`phase_sequence: "UVW"`). Reversal (e.g. $U \to W \to V$) fails closed with `PHASE_SEQUENCE_MISMATCH`, decoupling envelope symmetry from phase direction.
+- **Deadband Bounds (Min & Max)**: Complementary switching pairs strictly enforce both `deadtime_min_ns >= min_allowed_ns` (shoot-through prevention) and `deadtime_max_ns <= max_allowed_ns` (distortion limitation) across both rising and falling deadtimes.
+
+---
+
+## 6. Host-Device Evidence & CLI JSON Escaping Contract
+
+- **RFC 8259 Compliance**: All CLI JSON outputs (`--json` flag) enforce RFC 8259 compliance via `atkdl16::json_escape()`. Characters including `"`, `\`, `\b`, `\f`, `\n`, `\r`, `\t`, and control characters `0x00..0x1F` are escaped. Windows paths (e.g. `D:\a\ATK-Logic-Mcp\captures`) parse cleanly via `json.loads` without JSONDecodeError.
+- **Stream Write-State Validation**: Binary sample files (`.bits`), transition tables (`edges.json`), and metadata (`meta.json`) validate file stream integrity via `.good()`, `.fail()`, `.bad()`, `.flush()`, and `.close()`. Any disk write or permission failure immediately returns `false` and sets `ErrorCode::ArtifactWriteError`.
+- **Order 3 (TriggerOffset) Policy**: In Buffer mode, Order 3 (`TriggerOffset`) carries vernier trigger offset and per-channel sample byte counts for pre-trigger cropping. Missing Order 3 logs an explicit warning without stalling capture if complete sample depth is verified across all channels; duplicate Order 3 packets are detected and rejected.
+

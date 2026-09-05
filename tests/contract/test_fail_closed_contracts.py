@@ -95,7 +95,7 @@ def test_fail_closed_hil_spec_validation():
     # 1. Deprecated pwm_frequency
     spec_old_freq = {
         "test_suite": "Old Suite",
-        "capture": {"channels": [0], "sample_rate_hz": 1e6, "duration_ms": 10, "mode": "buffer"},
+        "capture": {"channels": [0], "sample_rate_hz": 1e6, "duration_ms": 10, "threshold_voltage": 1.65, "mode": "buffer"},
         "assertions": {"pwm_frequency": {"target_hz": 1000.0}}
     }
     with pytest.raises(HilSpecError) as exc:
@@ -105,7 +105,7 @@ def test_fail_closed_hil_spec_validation():
     # 2. Deprecated three_phase_balance
     spec_old_bal = {
         "test_suite": "Old Suite",
-        "capture": {"channels": [0, 1, 2], "sample_rate_hz": 1e6, "duration_ms": 10, "mode": "buffer"},
+        "capture": {"channels": [0, 1, 2], "sample_rate_hz": 1e6, "duration_ms": 10, "threshold_voltage": 1.65, "mode": "buffer"},
         "assertions": {"three_phase_balance": {}}
     }
     with pytest.raises(HilSpecError) as exc:
@@ -115,7 +115,7 @@ def test_fail_closed_hil_spec_validation():
     # 3. Stream mode rejected in HIL
     spec_stream = {
         "test_suite": "Stream Suite",
-        "capture": {"channels": [0], "sample_rate_hz": 1e6, "duration_ms": 10, "mode": "stream"},
+        "capture": {"channels": [0], "sample_rate_hz": 1e6, "duration_ms": 10, "threshold_voltage": 1.65, "mode": "stream"},
         "assertions": {"pwm_carrier": {"target_hz": 10000.0}}
     }
     with pytest.raises(HilSpecError) as exc:
@@ -249,4 +249,539 @@ def test_fail_closed_hil_runner_incomplete_capture():
 
     assert rep["status"] == "HIL_FAIL"
     assert "integrity" in rep["reason"].lower()
+
+
+def test_fail_closed_nested_spec_schema():
+    """Verify validate_hil_spec strictly fails closed against typos and illegal bounds."""
+    base_valid = {
+        "test_suite": "DK9 OpenLoop PWM Verification",
+        "version": "1.1.0",
+        "capture": {
+            "channels": [0, 1, 2, 3, 4, 5],
+            "sample_rate_hz": 100_000_000,
+            "duration_ms": 40,
+            "threshold_voltage": 1.65,
+            "mode": "buffer"
+        },
+        "assertions": {
+            "pwm_carrier": {"target_hz": 16000.0, "tolerance_hz": 100.0},
+            "duty_cycle": {"mode": "dynamic_sine_modulation", "min_allowed_duty": 0.05, "max_allowed_duty": 0.95},
+            "deadtime": {"min_allowed_ns": 800.0, "max_allowed_ns": 1200.0},
+            "shoot_through_protection": {"allow_overlap": False, "max_overlap_samples": 0},
+            "three_phase_modulation": {
+                "fundamental_frequency_hz": 50.0,
+                "phase_shift_target_deg": 120.0,
+                "phase_shift_tolerance_deg": 15.0,
+                "phase_sequence": "UVW"
+            }
+        }
+    }
+
+    # 1. Typo in pwm_carrier: target_hzz
+    spec_typo1 = dict(base_valid)
+    spec_typo1["assertions"] = dict(base_valid["assertions"])
+    spec_typo1["assertions"]["pwm_carrier"] = {"target_hzz": 16000.0, "tolerance_hz": 100.0}
+    with pytest.raises(HilSpecError) as exc:
+        validate_hil_spec(spec_typo1)
+    assert "target_hzz" in str(exc.value)
+
+    # 2. Typo in capture: sample_rate_hzz
+    spec_typo2 = dict(base_valid)
+    spec_typo2["capture"] = dict(base_valid["capture"])
+    spec_typo2["capture"]["sample_rate_hzz"] = 100_000_000
+    with pytest.raises(HilSpecError) as exc:
+        validate_hil_spec(spec_typo2)
+    assert "sample_rate_hzz" in str(exc.value)
+
+    # 3. Bad duty bounds: min > max
+    spec_bad_duty = dict(base_valid)
+    spec_bad_duty["assertions"] = dict(base_valid["assertions"])
+    spec_bad_duty["assertions"]["duty_cycle"] = {
+        "mode": "dynamic_sine_modulation",
+        "min_allowed_duty": 0.90,
+        "max_allowed_duty": 0.10
+    }
+    with pytest.raises(HilSpecError) as exc:
+        validate_hil_spec(spec_bad_duty)
+    assert "Duty bounds" in str(exc.value)
+
+    # 4. Bad deadtime bounds: min > max
+    spec_bad_dt = dict(base_valid)
+    spec_bad_dt["assertions"] = dict(base_valid["assertions"])
+    spec_bad_dt["assertions"]["deadtime"] = {
+        "min_allowed_ns": 1500.0,
+        "max_allowed_ns": 800.0
+    }
+    with pytest.raises(HilSpecError) as exc:
+        validate_hil_spec(spec_bad_dt)
+    assert "Deadtime bounds" in str(exc.value)
+
+    # 5. Invalid shoot-through setting: allow_overlap=False with max_overlap_samples > 0
+    spec_bad_st = dict(base_valid)
+    spec_bad_st["assertions"] = dict(base_valid["assertions"])
+    spec_bad_st["assertions"]["shoot_through_protection"] = {
+        "allow_overlap": False,
+        "max_overlap_samples": 10
+    }
+    with pytest.raises(HilSpecError) as exc:
+        validate_hil_spec(spec_bad_st)
+    assert "max_overlap_samples" in str(exc.value)
+
+
+def test_fail_closed_reversed_phase_sequence():
+    """Verify reversed phase sequence UWV fails closed with PHASE_SEQUENCE_MISMATCH."""
+    from tests.contract.test_mock_hil_contract import generate_mock_dk9_openloop_waveforms
+
+    raw_channels = generate_mock_dk9_openloop_waveforms()
+    # Reverse sequence by swapping Phase V (ch 2, 3) and Phase W (ch 4, 5)
+    raw_reversed = {
+        0: raw_channels[0],
+        1: raw_channels[1],
+        2: raw_channels[4],
+        3: raw_channels[5],
+        4: raw_channels[2],
+        5: raw_channels[3],
+    }
+
+    mock_status = {"connected": True, "ready": True, "is_busy": False}
+    mock_cap_res = {
+        "success": True,
+        "evidence_source": "REAL_HARDWARE",
+        "data_integrity": "COMPLETE",
+        "capture_id": "hil_mock_rev_seq",
+        "requested_samples": 4_000_000,
+        "minimum_actual_samples": 4_000_000,
+        "actual_samples_per_channel": {i: 4_000_000 for i in range(6)},
+        "trigger_ack_received": True,
+        "trigger_offset_received": True,
+        "capture_complete_received": True,
+        "capacity_exceeded": False,
+        "bandwidth_exceeded": False,
+        "artifact_dir": "captures/hil_mock_rev_seq",
+        "warnings": []
+    }
+
+    def mock_load_channel(cap_id, ch):
+        meta = {
+            "evidence_source": "REAL_HARDWARE",
+            "data_integrity": "COMPLETE",
+            "mode": "buffer",
+            "sample_rate": 100_000_000.0,
+            "samples": 4_000_000
+        }
+        return raw_reversed[ch], meta
+
+    with patch("tests.hil.run_dk9_hil.logic_status", return_value=mock_status), \
+         patch("tests.hil.run_dk9_hil.logic_capture", return_value=mock_cap_res), \
+         patch("tests.hil.run_dk9_hil._load_capture_channel_bits", side_effect=mock_load_channel):
+
+        rep = run_dk9_hil_test("tests/hil/dk9_openloop_pwm.yaml")
+
+    assert rep["status"] == "HIL_FAIL"
+    assert rep["reason"] == "PHASE_SEQUENCE_MISMATCH"
+    assert rep["assertions"]["three_phase_modulation"]["passed"] is False
+    assert any("sequence mismatch" in f.lower() for f in rep["failures"])
+
+
+def test_fail_closed_deadtime_max_bound_exceeded():
+    """Verify deadtime exceeding max_allowed_ns fails closed even if min_allowed_ns passes."""
+    # Generate waveforms with 2500 ns deadtime (exceeds max_allowed_ns: 1200.0 ns)
+    from tests.contract.test_mock_hil_contract import generate_mock_dk9_openloop_waveforms
+
+    raw_channels = generate_mock_dk9_openloop_waveforms(deadtime_ns=2500.0)
+
+    mock_status = {"connected": True, "ready": True, "is_busy": False}
+    mock_cap_res = {
+        "success": True,
+        "evidence_source": "REAL_HARDWARE",
+        "data_integrity": "COMPLETE",
+        "capture_id": "hil_mock_excess_deadtime",
+        "requested_samples": 4_000_000,
+        "minimum_actual_samples": 4_000_000,
+        "actual_samples_per_channel": {i: 4_000_000 for i in range(6)},
+        "trigger_ack_received": True,
+        "trigger_offset_received": True,
+        "capture_complete_received": True,
+        "capacity_exceeded": False,
+        "bandwidth_exceeded": False,
+        "artifact_dir": "captures/hil_mock_excess_deadtime",
+        "warnings": []
+    }
+
+    def mock_load_channel(cap_id, ch):
+        meta = {
+            "evidence_source": "REAL_HARDWARE",
+            "data_integrity": "COMPLETE",
+            "mode": "buffer",
+            "sample_rate": 100_000_000.0,
+            "samples": 4_000_000
+        }
+        return raw_channels[ch], meta
+
+    with patch("tests.hil.run_dk9_hil.logic_status", return_value=mock_status), \
+         patch("tests.hil.run_dk9_hil.logic_capture", return_value=mock_cap_res), \
+         patch("tests.hil.run_dk9_hil._load_capture_channel_bits", side_effect=mock_load_channel):
+
+        rep = run_dk9_hil_test("tests/hil/dk9_openloop_pwm.yaml")
+
+    assert rep["status"] == "HIL_FAIL"
+    assert rep["assertions"]["deadtime"]["passed"] is False
+    assert any("deadtime" in f.lower() and "outside" in f.lower() for f in rep["failures"])
+
+
+def test_cli_json_escape_windows_path():
+    """Verify CLI JSON output correctly escapes Windows paths with backslashes and spaces."""
+    import subprocess
+    from atk_dl16_mcp.server import _find_cli
+    cli = _find_cli()
+    if not cli:
+        pytest.skip("CLI not built yet")
+    win_out_dir = r"D:\a\ATK-Logic-Mcp\captures\run 01\sub path"
+    cmd = [str(cli), "capture", "--json", "--channels", "0,1", "--out", win_out_dir]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    assert proc.stdout.strip()
+    data = json.loads(proc.stdout)
+    assert isinstance(data, dict)
+    assert data.get("artifact_dir") == win_out_dir
+    assert r"\\" in proc.stdout
+
+
+def test_cli_json_escape_quote():
+    """Verify CLI JSON output correctly escapes quotation marks."""
+    import subprocess
+    from atk_dl16_mcp.server import _find_cli
+    cli = _find_cli()
+    if not cli:
+        pytest.skip("CLI not built yet")
+    win_out_dir = r'C:\captures\"quoted_session"'
+    cmd = [str(cli), "capture", "--json", "--out", win_out_dir]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    data = json.loads(proc.stdout)
+    assert isinstance(data, dict)
+    assert data.get("artifact_dir") == win_out_dir
+    assert r'\"quoted_session\"' in proc.stdout
+
+
+def test_cli_json_escape_backslash():
+    """Verify CLI JSON output correctly escapes double backslashes and network shares."""
+    import subprocess
+    from atk_dl16_mcp.server import _find_cli
+    cli = _find_cli()
+    if not cli:
+        pytest.skip("CLI not built yet")
+    win_out_dir = r"\\network\share\captures\\nested"
+    cmd = [str(cli), "capture", "--json", "--out", win_out_dir]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    data = json.loads(proc.stdout)
+    assert isinstance(data, dict)
+    assert data.get("artifact_dir") == win_out_dir
+
+
+def test_cli_json_escape_control_chars():
+    """Verify CLI JSON output correctly escapes control characters without JSONDecodeError."""
+    import subprocess
+    from atk_dl16_mcp.server import _find_cli
+    cli = _find_cli()
+    if not cli:
+        pytest.skip("CLI not built yet")
+    ctrl_dir = "captures\nwith\rnewline\tand\ttab"
+    cmd = [str(cli), "capture", "--json", "--out", ctrl_dir]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    data = json.loads(proc.stdout)
+    assert isinstance(data, dict)
+    assert data.get("artifact_dir") == ctrl_dir
+    assert r"\n" in proc.stdout
+    assert r"\t" in proc.stdout
+
+
+def test_nested_hil_schema_target_hzz_reject():
+    """Reject unknown key target_hzz in assertions.pwm_carrier."""
+    spec = {
+        "test_suite": "DK9 Test",
+        "capture": {"channels": [0], "sample_rate_hz": 100e6, "duration_ms": 10, "threshold_voltage": 1.65, "mode": "buffer"},
+        "assertions": {"pwm_carrier": {"target_hzz": 16000.0}}
+    }
+    with pytest.raises(HilSpecError) as exc:
+        validate_hil_spec(spec)
+    assert "target_hzz" in str(exc.value)
+
+
+def test_nested_hil_schema_deadtime_empty_reject():
+    """Reject empty deadtime {} block."""
+    spec = {
+        "test_suite": "DK9 Test",
+        "capture": {"channels": [0], "sample_rate_hz": 100e6, "duration_ms": 10, "threshold_voltage": 1.65, "mode": "buffer"},
+        "assertions": {"deadtime": {}}
+    }
+    with pytest.raises(HilSpecError) as exc:
+        validate_hil_spec(spec)
+    assert "deadtime" in str(exc.value).lower()
+
+
+def test_nested_hil_schema_missing_threshold_voltage_reject():
+    """Reject missing threshold_voltage in capture section."""
+    spec = {
+        "test_suite": "DK9 Test",
+        "capture": {"channels": [0], "sample_rate_hz": 100e6, "duration_ms": 10, "mode": "buffer"},
+        "assertions": {"pwm_carrier": {"target_hz": 16000.0}}
+    }
+    with pytest.raises(HilSpecError) as exc:
+        validate_hil_spec(spec)
+    assert "threshold_voltage" in str(exc.value)
+
+
+def test_nested_hil_schema_min_duty_gt_max_duty_reject():
+    """Reject min_allowed_duty > max_allowed_duty."""
+    spec = {
+        "test_suite": "DK9 Test",
+        "capture": {"channels": [0], "sample_rate_hz": 100e6, "duration_ms": 10, "threshold_voltage": 1.65, "mode": "buffer"},
+        "assertions": {"duty_cycle": {"mode": "dynamic_sine_modulation", "min_allowed_duty": 0.85, "max_allowed_duty": 0.15}}
+    }
+    with pytest.raises(HilSpecError) as exc:
+        validate_hil_spec(spec)
+    assert "Duty bounds" in str(exc.value)
+
+
+def test_nested_hil_schema_min_deadtime_gt_max_deadtime_reject():
+    """Reject min_allowed_ns > max_allowed_ns."""
+    spec = {
+        "test_suite": "DK9 Test",
+        "capture": {"channels": [0], "sample_rate_hz": 100e6, "duration_ms": 10, "threshold_voltage": 1.65, "mode": "buffer"},
+        "assertions": {"deadtime": {"min_allowed_ns": 2000.0, "max_allowed_ns": 1000.0}}
+    }
+    with pytest.raises(HilSpecError) as exc:
+        validate_hil_spec(spec)
+    assert "Deadtime bounds" in str(exc.value)
+
+
+def test_nested_hil_schema_unknown_nested_field_reject():
+    """Reject unknown nested field across all assertion sections."""
+    spec = {
+        "test_suite": "DK9 Test",
+        "capture": {"channels": [0], "sample_rate_hz": 100e6, "duration_ms": 10, "threshold_voltage": 1.65, "mode": "buffer"},
+        "assertions": {"shoot_through_protection": {"allow_overlap": False, "unknown_field": 123}}
+    }
+    with pytest.raises(HilSpecError) as exc:
+        validate_hil_spec(spec)
+    assert "unknown_field" in str(exc.value)
+
+
+def test_phase_sequence_uvw_valid_pass():
+    """Verify UVW phase sequence passes and is recognized."""
+    from tests.contract.test_mock_hil_contract import generate_mock_dk9_openloop_waveforms
+    raw_channels = generate_mock_dk9_openloop_waveforms()
+    res = analyze_three_phase(
+        raw_channels[0], raw_channels[2], raw_channels[4],
+        sample_rate=100_000_000.0
+    )
+    assert res.valid is True
+    assert res.modulation.is_balanced is True
+    assert abs(res.modulation.phase_shift_uv_deg - 120.0) <= 15.0
+    assert abs(res.modulation.phase_shift_vw_deg - 120.0) <= 15.0
+
+
+def test_phase_sequence_balanced_reverse_fail():
+    """Prove that balanced 120 deg displacement != correct sequence (UWV is balanced but fails sequence check)."""
+    from tests.contract.test_mock_hil_contract import generate_mock_dk9_openloop_waveforms
+    raw_channels = generate_mock_dk9_openloop_waveforms()
+    # Swap Phase V (ch 2) and Phase W (ch 4) -> sequence becomes UWV
+    res = analyze_three_phase(
+        raw_channels[0], raw_channels[4], raw_channels[2],
+        sample_rate=100_000_000.0
+    )
+    # The displacement between phases is still 120 degrees, so modulation is balanced!
+    assert res.modulation.is_balanced is True
+    assert abs(res.modulation.phase_shift_uv_deg - 240.0) <= 15.0
+    assert abs(res.modulation.phase_shift_uv_deg - 120.0) > 15.0
+
+    # Now verify HIL runner strictly fails on UWV when UVW expected
+    mock_status = {"connected": True, "ready": True, "is_busy": False}
+    mock_cap_res = {
+        "success": True, "evidence_source": "REAL_HARDWARE", "data_integrity": "COMPLETE",
+        "capture_id": "hil_mock_uwv", "requested_samples": 4_000_000,
+        "minimum_actual_samples": 4_000_000,
+        "actual_samples_per_channel": {i: 4_000_000 for i in range(6)},
+        "trigger_ack_received": True, "trigger_offset_received": True,
+        "capture_complete_received": True, "capacity_exceeded": False,
+        "bandwidth_exceeded": False, "artifact_dir": "captures/hil_mock_uwv", "warnings": []
+    }
+    raw_reversed = {
+        0: raw_channels[0], 1: raw_channels[1],
+        2: raw_channels[4], 3: raw_channels[5],
+        4: raw_channels[2], 5: raw_channels[3],
+    }
+    def mock_load_channel(cap_id, ch):
+        return raw_reversed[ch], {"evidence_source": "REAL_HARDWARE", "data_integrity": "COMPLETE", "mode": "buffer", "sample_rate": 100e6, "samples": 4_000_000}
+
+    with patch("tests.hil.run_dk9_hil.logic_status", return_value=mock_status), \
+         patch("tests.hil.run_dk9_hil.logic_capture", return_value=mock_cap_res), \
+         patch("tests.hil.run_dk9_hil._load_capture_channel_bits", side_effect=mock_load_channel):
+        rep = run_dk9_hil_test("tests/hil/dk9_openloop_pwm.yaml")
+
+    assert rep["status"] == "HIL_FAIL"
+    assert rep["reason"] == "PHASE_SEQUENCE_MISMATCH"
+
+
+def test_deadtime_max_old_logic_pass_new_logic_fail():
+    """Verify deadtime validation:
+    Normal 1000 ns -> PASS.
+    One commutation 900 ns, another 3000 ns:
+    Old min-only logic (min >= 800 ns) would PASS (since 900 >= 800 and 3000 >= 800).
+    New min+max logic fails closed because max (3000 ns) > max_allowed_ns (1200 ns).
+    """
+    sr = 100_000_000.0
+    period = 6250
+    n_cycles = 10
+    total_samples = period * n_cycles
+
+    h_bits = np.zeros(total_samples, dtype=np.uint8)
+    l_bits = np.zeros(total_samples, dtype=np.uint8)
+
+    for k in range(n_cycles):
+        base = k * period
+        if k == 5:
+            dt_r = 90   # 900 ns
+            dt_f = 90   # 900 ns
+        elif k == 6:
+            dt_r = 300  # 3000 ns
+            dt_f = 300  # 3000 ns
+        else:
+            dt_r = 100  # 1000 ns
+            dt_f = 100  # 1000 ns
+
+        h_start = 1500
+        h_end = 4500
+        h_bits[base + h_start : base + h_end] = 1
+
+        l_bits[base : base + h_start - dt_r] = 1
+        l_bits[base + h_end + dt_f : base + period] = 1
+
+    h_raw = np.packbits(h_bits, bitorder="little").tobytes()
+    l_raw = np.packbits(l_bits, bitorder="little").tobytes()
+
+    pair = analyze_complementary_pair(h_raw, l_raw, sr, 0, 1)
+
+    min_allowed = 800.0   # ns
+    max_allowed = 1200.0  # ns
+
+    # Assert old min-only logic would PASS:
+    old_min_only_pass = pair.deadtime_min_ns >= min_allowed
+    assert old_min_only_pass is True
+    assert pair.deadtime_min_ns == pytest.approx(900.0, abs=20.0)
+
+    # Assert new logic FAILS because deadtime_max exceeds max_allowed:
+    new_logic_pass = (pair.deadtime_min_ns >= min_allowed) and (pair.deadtime_max_ns <= max_allowed)
+    assert new_logic_pass is False
+    assert pair.deadtime_max_ns == pytest.approx(3000.0, abs=20.0)
+
+
+def test_output_edge_period_variation_dynamic_duty():
+    """Verify under center-aligned triangular modulation + dynamic duty that output edge
+    period variation RMS is non-zero, and verify documentation/API does NOT call it carrier clock jitter."""
+    sr = 100_000_000.0
+    f_carrier = 16_000.0
+    f_mod = 50.0
+    period_samples = int(round(sr / f_carrier))
+    n_cycles = 320
+    total = period_samples * n_cycles
+
+    t_span = np.arange(n_cycles) / f_carrier
+    duty = 0.50 + 0.35 * np.sin(2.0 * np.pi * f_mod * t_span)
+
+    bits = np.zeros(total, dtype=np.uint8)
+    for k in range(n_cycles):
+        base = k * period_samples
+        high_samples = int(round(duty[k] * period_samples))
+        offset = (period_samples - high_samples) // 2
+        bits[base + offset : base + offset + high_samples] = 1
+
+    raw = np.packbits(bits, bitorder="little").tobytes()
+    meas = analyze_pwm(raw, sr)
+
+    assert meas.period_variation_rms_ns > 0.0
+    assert hasattr(meas, "period_variation_rms_ns")
+    assert not hasattr(meas, "carrier_clock_jitter_ns")
+
+
+def test_trigger_offset_optional_when_complete():
+    """Verify upstream AlienTek audit conclusion:
+    Order 3 (TriggerOffset) is optional when sample depth is complete.
+    When all channels receive target sample count, absence of Order 3 does not fail the capture.
+    """
+    mock_status = {"connected": True, "ready": True, "is_busy": False}
+    from tests.contract.test_mock_hil_contract import generate_mock_dk9_openloop_waveforms
+    raw_channels = generate_mock_dk9_openloop_waveforms()
+
+    mock_cap_res = {
+        "success": True,
+        "evidence_source": "REAL_HARDWARE",
+        "data_integrity": "COMPLETE",
+        "capture_id": "hil_mock_no_order3",
+        "requested_samples": 4_000_000,
+        "minimum_actual_samples": 4_000_000,
+        "actual_samples_per_channel": {i: 4_000_000 for i in range(6)},
+        "trigger_ack_received": True,
+        "trigger_offset_received": False,
+        "capture_complete_received": True,
+        "capacity_exceeded": False,
+        "bandwidth_exceeded": False,
+        "artifact_dir": "captures/hil_mock_no_order3",
+        "warnings": ["TriggerOffset packet (Order 3) not received; pre-trigger offset alignment skipped"]
+    }
+
+    def mock_load_channel(cap_id, ch):
+        return raw_channels[ch], {"evidence_source": "REAL_HARDWARE", "data_integrity": "COMPLETE", "mode": "buffer", "sample_rate": 100e6, "samples": 4_000_000}
+
+    with patch("tests.hil.run_dk9_hil.logic_status", return_value=mock_status), \
+         patch("tests.hil.run_dk9_hil.logic_capture", return_value=mock_cap_res), \
+         patch("tests.hil.run_dk9_hil._load_capture_channel_bits", side_effect=mock_load_channel):
+        rep = run_dk9_hil_test("tests/hil/dk9_openloop_pwm.yaml")
+
+    assert rep["evidence_source"] == "REAL_HARDWARE"
+    assert rep["data_integrity"] == "COMPLETE"
+    assert rep["status"] == "HIL_PASS"
+
+
+def test_artifact_write_failure_simulation():
+    """Verify artifact write failure contract:
+    save_to_directory == False -> CaptureResult.success == False, ErrorCode::ArtifactWriteError.
+    """
+    from atk_dl16_mcp.server import logic_capture
+    fail_cli_json = json.dumps({
+        "success": False,
+        "error_code": "ARTIFACT_WRITE_ERROR",
+        "message": "Failed to write capture artifacts to directory: /invalid/readonly/dir",
+        "evidence_source": "REAL_HARDWARE",
+        "data_integrity": "INCOMPLETE",
+        "capture_complete_received": True,
+        "artifact_dir": "/invalid/readonly/dir",
+        "warnings": []
+    })
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 1
+        mock_run.return_value.stdout = fail_cli_json
+        mock_run.return_value.stderr = ""
+        res = logic_capture([0, 1], sample_rate_hz=20_000_000, duration_ms=10)
+
+    assert res["success"] is False
+    assert res["error_code"] == "ARTIFACT_WRITE_ERROR"
+    assert res["data_integrity"] == "INCOMPLETE"
+
+
+def test_hil_unsupported_device_model_not_run():
+    """Verify that an unsupported device model returns HIL_NOT_RUN / UNSUPPORTED_DEVICE, not a waveform failure."""
+    mock_status = {
+        "connected": True,
+        "ready": True,
+        "is_busy": False,
+        "model_name": "Saleae Logic Pro 8"
+    }
+    with patch("tests.hil.run_dk9_hil.logic_status", return_value=mock_status):
+        rep = run_dk9_hil_test("tests/hil/dk9_openloop_pwm.yaml")
+
+    assert rep["status"] == "HIL_NOT_RUN"
+    assert rep["evidence_source"] == "NONE"
+    assert "UNSUPPORTED_DEVICE" in rep["reason"]
+
+
 

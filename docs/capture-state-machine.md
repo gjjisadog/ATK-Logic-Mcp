@@ -80,7 +80,7 @@ while (ReadSynchronous(buffer, timeout=5ms) > 0) {
 ```
 This ensures no leftover packets from a prior aborted capture corrupt the stream parser.
 
-### 3.3 Buffer Cropping & Trigger Alignment
+### 3.3 Buffer Cropping & Trigger Alignment (Order 3 Policy)
 When `Order 3` (`TriggerOffset`) arrives:
 1. Extract `vernierTriggerPosition` ($T_{\text{offset}}$, 40-bit uint).
 2. For each channel $i \in [0, \text{channels}-1]$:
@@ -92,10 +92,16 @@ When `Order 3` (`TriggerOffset`) arrives:
    - Adjust bit index by $\text{startOffset}_i \pmod 8$.
    - The trigger event aligns deterministically at index $\text{TriggerSamplingDepth}$.
 
+**Upstream Audit & Enforcement Policy**:
+- In upstream `pv/thread/thread_work.cpp:230-315`, Order 3 is received asynchronously to calculate trigger alignment offsets. Upstream tracks `isOffsetOrder = true` to guard against duplicate Order 3 packets, but does not stall completion if Order 3 is absent.
+- In `ATK-Logic-Mcp`: Duplicate Order 3 packets are guarded and logged as warnings. In Buffer mode with trigger offset, receiving Order 3 sets `trigger_offset_received = true`. If Order 3 is not received, but Order 6 Complete arrives and full sample depth is verified across all channels, capture completes without pre-trigger cropping (logging an explicit warning), preventing unnecessary deadlocks while preserving strict sample completeness verification.
+
 ### 3.4 Data Integrity & Unified RX Dispatch Contract
 To eliminate false-positive capture completions, the pipeline enforces fail-closed evidence validation:
 1. **Unified RX Dispatch & Order 4 ACK**: After issuing `SimpleTrigger` (`0x12`), the driver enters a unified RX message dispatch loop. Non-ACK messages (`ChannelData`, `TriggerOffset`, `Progress`) that arrive before or interleaved with `Order 4` ACK are ingested into sample storage without data loss. Capture cannot complete unless `trigger_ack_received == true` (`status == 3`, `CMD_SIMPLE_TRIGGER`).
 2. **Order 6 Completion**: Buffer mode capture must terminate with a valid `Order 6` completion token from the hardware before finalizing.
 3. **100% Channel Completeness**: Every enabled channel must deliver 100% of the requested sample depth (`actual_samples >= requested_samples`). Any channel delivering fewer samples than requested flags `DataIntegrity::Incomplete` and fails closed with `ErrorCode::IncompleteCapture`.
 4. **Hardware Capacity Enforcement**: Captures exceeding hardware RAM (128 MB for DL16, 448 MB for DL16 Plus) fail immediately with `DataIntegrity::Overflow` rather than corrupting memory.
-5. **Artifact Provenance & Save Validation**: Artifact storage writes `evidence_source: "REAL_HARDWARE"` into `meta.json` and verifies that all files are written successfully. Failures flag `ErrorCode::ArtifactWriteError`.
+5. **Artifact Provenance & Save Validation**: Artifact storage writes `evidence_source: "REAL_HARDWARE"` into `meta.json` and verifies that all file streams (`.bits`, `edges.json`, `meta.json`) flush and close without I/O errors (`out.good() && !out.fail() && !out.bad()`). Write failures trigger `ErrorCode::ArtifactWriteError`.
+6. **RFC 8259 JSON Escaping**: All JSON outputs from CLI serialize via `atkdl16::json_escape()`, ensuring Windows paths and special characters are parsed cleanly by MCP and external tools.
+

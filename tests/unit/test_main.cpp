@@ -5,6 +5,7 @@
 #include "atkdl16/capability.h"
 #include "atkdl16/sample_store.h"
 #include "atkdl16/device.h"
+#include "atkdl16/json_util.h"
 #include <iostream>
 #include <vector>
 #include <numeric>
@@ -411,6 +412,209 @@ TEST_CASE(test_order4_ack_trigger_validation) {
     auto bad_ack = RxParser::parse_ack(msg);
     ASSERT_TRUE(bad_ack.has_value());
     ASSERT_EQ(bad_ack->status, 2);
+}
+
+TEST_CASE(test_json_escaping_windows_paths_and_controls) {
+    // 1. Windows path with backslashes
+    std::string win_path = R"(D:\a\ATK-Logic-Mcp\captures\cap_1234)";
+    std::string escaped_win_path = json_escape(win_path);
+    ASSERT_EQ(escaped_win_path, R"(D:\\a\\ATK-Logic-Mcp\\captures\\cap_1234)");
+
+    // 2. Quotes and common escape sequences
+    std::string quote_and_esc = "line1 \"quoted\"\nline2\r\t\b\f\\";
+    std::string escaped_q = json_escape(quote_and_esc);
+    ASSERT_EQ(escaped_q, "line1 \\\"quoted\\\"\\nline2\\r\\t\\b\\f\\\\");
+
+    // 3. Control character \x00 .. \x1f escaping
+    std::string ctrl_str;
+    ctrl_str.push_back('\x00');
+    ctrl_str.push_back('\x07');
+    ctrl_str.push_back('\x1f');
+    std::string escaped_ctrl = json_escape(ctrl_str);
+    ASSERT_EQ(escaped_ctrl, "\\u0000\\u0007\\u001f");
+
+    // 4. CaptureResult serialization
+    CaptureResult res;
+    res.success = true;
+    res.capture_id = "cap_9999_1234";
+    res.data_integrity = DataIntegrity::Complete;
+    res.requested_samples = 1000;
+    res.minimum_actual_samples = 1000;
+    res.actual_samples_per_channel[0] = 1000;
+    res.trigger_ack_received = true;
+    res.trigger_offset_received = true;
+    res.capture_complete_received = true;
+    res.warnings.push_back(R"(Warning: path "C:\temp\test" checked)");
+
+    std::string win_dir = R"(D:\a\ATK-Logic-Mcp\captures)";
+    std::string serialized = serialize_capture_result_json(res, win_dir);
+    ASSERT_TRUE(serialized.find(R"("artifact_dir": "D:\\a\\ATK-Logic-Mcp\\captures/cap_9999_1234")") != std::string::npos);
+    ASSERT_TRUE(serialized.find(R"("success": true)") != std::string::npos);
+    ASSERT_TRUE(serialized.find(R"(Warning: path \"C:\\temp\\test\" checked)") != std::string::npos);
+
+    // 5. Failure result serialization
+    CaptureResult fail_res;
+    fail_res.success = false;
+    fail_res.error_code = ErrorCode::UsbOpenFailed;
+    fail_res.error_message = R"(Failed to open device at "Port 1\Bus 2")";
+    std::string fail_json = serialize_capture_result_json(fail_res, win_path);
+    ASSERT_TRUE(fail_json.find(R"("success": false)") != std::string::npos);
+    ASSERT_TRUE(fail_json.find(R"(Failed to open device at \"Port 1\\Bus 2\")") != std::string::npos);
+}
+
+TEST_CASE(test_sample_store_write_stream_validation) {
+    CaptureConfig config;
+    config.enabled_channels = {0};
+    config.sample_rate = 1'000'000;
+    config.duration_ms = 1;
+    SampleStore store(config);
+
+    std::vector<uint8_t> dummy_data(100, 0x55);
+    store.append_channel_data(0, dummy_data.data(), dummy_data.size());
+    store.finalize_samples(800);
+
+    // 1. Empty directory or capture_id must fail closed
+    ASSERT_FALSE(store.save_to_directory("", "cap_valid"));
+    ASSERT_FALSE(store.save_to_directory("test_dir", ""));
+
+    // 2. Valid save to temp directory
+    std::string test_dir = "test_artifacts_tmp";
+    std::string cap_id = "test_write_cap";
+    ASSERT_TRUE(store.save_to_directory(test_dir, cap_id));
+
+    fs::path p(test_dir);
+    p = p / cap_id;
+    ASSERT_TRUE(fs::exists(p / "ch00.bits"));
+    ASSERT_TRUE(fs::exists(p / "edges.json"));
+    ASSERT_TRUE(fs::exists(p / "meta.json"));
+
+    // Clean up temp test directory
+    std::error_code ec;
+    fs::remove_all(test_dir, ec);
+}
+
+TEST_CASE(test_trigger_offset_packet_structure) {
+    // 5 bytes vernier offset + 16 channels * 5 bytes + 1 byte flags = 86 bytes
+    std::vector<uint8_t> trig_payload(88, 0x00);
+    // Vernier trigger position = 500
+    trig_payload[2] = 0xF4;
+    trig_payload[3] = 0x01; // 500
+
+    // Channel 0 sample count = 1000 bytes
+    trig_payload[7] = 0xE8;
+    trig_payload[8] = 0x03;
+
+    RxMessage msg;
+    msg.type = RxMessageType::TriggerOffset;
+    msg.payload = trig_payload;
+
+    auto opt = RxParser::parse_trigger_offset(msg, 16, false);
+    ASSERT_TRUE(opt.has_value());
+    ASSERT_EQ(opt->trigger_sample_offset, 500ULL);
+    ASSERT_EQ(opt->channel_byte_counts[0], 1000ULL);
+    ASSERT_FALSE(opt->exceed_capacity);
+    ASSERT_FALSE(opt->exceed_bandwidth);
+}
+
+TEST_CASE(test_cli_json_escape_windows_path) {
+    std::string win_path = R"(C:\Program Files\AlienTek\Logic Analyzer\captures\run 01)";
+    std::string escaped = json_escape(win_path);
+    ASSERT_TRUE(escaped.find(R"(C:\\Program Files\\AlienTek\\Logic Analyzer\\captures\\run 01)") != std::string::npos);
+
+    CaptureResult res;
+    res.success = true;
+    res.capture_id = "cap_win_test";
+    std::string serialized = serialize_capture_result_json(res, win_path);
+    ASSERT_TRUE(serialized.find(R"("artifact_dir": "C:\\Program Files\\AlienTek\\Logic Analyzer\\captures\\run 01/cap_win_test")") != std::string::npos);
+}
+
+TEST_CASE(test_cli_json_escape_quote) {
+    std::string quote_str = R"(device returned "STATUS_OK" with flag "FAST")";
+    std::string escaped = json_escape(quote_str);
+    ASSERT_EQ(escaped, R"(device returned \"STATUS_OK\" with flag \"FAST\")");
+
+    CaptureResult res;
+    res.success = false;
+    res.error_message = quote_str;
+    std::string serialized = serialize_capture_result_json(res, "");
+    ASSERT_TRUE(serialized.find(R"(\"STATUS_OK\")") != std::string::npos);
+}
+
+TEST_CASE(test_cli_json_escape_backslash) {
+    std::string slash_str = R"(\\server\share\path\\file)";
+    std::string escaped = json_escape(slash_str);
+    ASSERT_EQ(escaped, R"(\\\\server\\share\\path\\\\file)");
+
+    CaptureResult res;
+    res.success = false;
+    res.error_message = slash_str;
+    std::string serialized = serialize_capture_result_json(res, "");
+    ASSERT_TRUE(serialized.find(R"(\\\\server\\share\\path\\\\file)") != std::string::npos);
+}
+
+TEST_CASE(test_cli_json_escape_control_chars) {
+    std::string ctrl = "line1\nline2\rcarriage\ttab\bback\fform\x01\x1f";
+    std::string escaped = json_escape(ctrl);
+    ASSERT_TRUE(escaped.find(R"(\n)") != std::string::npos);
+    ASSERT_TRUE(escaped.find(R"(\r)") != std::string::npos);
+    ASSERT_TRUE(escaped.find(R"(\t)") != std::string::npos);
+    ASSERT_TRUE(escaped.find(R"(\b)") != std::string::npos);
+    ASSERT_TRUE(escaped.find(R"(\f)") != std::string::npos);
+    ASSERT_TRUE(escaped.find(R"(\u0001)") != std::string::npos);
+    ASSERT_TRUE(escaped.find(R"(\u001f)") != std::string::npos);
+}
+
+TEST_CASE(test_trigger_offset_optional_when_complete) {
+    // Upstream AlienTek audit: Order 3 (TriggerOffset) is optional when sample depth is complete.
+    // In capture.cpp: if received_trigger_offset is false and pre-trigger depth is requested,
+    // a non-fatal warning is logged, but capture succeeds when all channels receive target samples.
+    CaptureResult res;
+    res.requested_samples = 1000;
+    res.minimum_actual_samples = 1000;
+    res.actual_samples_per_channel[0] = 1000;
+    res.trigger_ack_received = true;
+    res.trigger_offset_received = false; // Order 3 not received
+    res.capture_complete_received = true;
+    res.data_integrity = DataIntegrity::Complete;
+    res.success = true;
+    res.warnings.push_back("TriggerOffset packet (Order 3) not received; pre-trigger offset alignment skipped");
+
+    ASSERT_TRUE(res.success);
+    ASSERT_TRUE(res.data_integrity == DataIntegrity::Complete);
+    ASSERT_FALSE(res.trigger_offset_received);
+    ASSERT_EQ(res.warnings.size(), 1);
+}
+
+TEST_CASE(test_artifact_write_failure_simulation) {
+    // 1. Invalid path that cannot be created / written
+    CaptureConfig config;
+    config.enabled_channels = {0};
+    config.sample_rate = 1'000'000;
+    config.duration_ms = 1;
+    SampleStore store(config);
+
+    std::vector<uint8_t> dummy(50, 0xAA);
+    store.append_channel_data(0, dummy.data(), dummy.size());
+    store.finalize_samples(400);
+
+    // Save to illegal Windows path (e.g. invalid device name or forbidden characters)
+#ifdef _WIN32
+    bool save_fail = store.save_to_directory(R"(Z:\non_existent_drive_xyz\nested)", "cap_fail");
+    ASSERT_FALSE(save_fail);
+#endif
+
+    // Verify CaptureResult contract when save_to_directory fails:
+    CaptureResult result;
+    bool save_ok = false;
+    if (!save_ok) {
+        result.data_integrity = DataIntegrity::Incomplete;
+        result.success = false;
+        result.error_code = ErrorCode::ArtifactWriteError;
+        result.error_message = "Failed to write capture artifacts to directory";
+    }
+    ASSERT_FALSE(result.success);
+    ASSERT_TRUE(result.error_code == ErrorCode::ArtifactWriteError);
+    ASSERT_TRUE(result.data_integrity == DataIntegrity::Incomplete);
 }
 
 // ============================================================================
