@@ -148,6 +148,10 @@ CaptureResult CaptureEngine::execute_capture(const CaptureConfig& config,
                         break;
                     }
                     case RxMessageType::TriggerOffset: {
+                        if (received_trigger_offset) {
+                            result.warnings.push_back("Duplicate TriggerOffset (Order 3) packet received");
+                            break;
+                        }
                         auto trig_opt = RxParser::parse_trigger_offset(msg, TOTAL_CHANNELS, config.enable_rle);
                         if (trig_opt) {
                             result.trigger_offset = trig_opt->trigger_sample_offset;
@@ -245,6 +249,8 @@ CaptureResult CaptureEngine::execute_capture(const CaptureConfig& config,
     // 7. Post-processing: Crop and Align Samples
     if (received_trigger_offset) {
         store.apply_start_offsets(channel_start_offsets);
+    } else if (config.mode == CaptureMode::Buffer && config.trigger.position_percent > 0.0 && !config.trigger.is_instantly) {
+        result.warnings.push_back("TriggerOffset packet (Order 3) not received; pre-trigger offset alignment skipped");
     }
     store.finalize_samples(target_samples);
 

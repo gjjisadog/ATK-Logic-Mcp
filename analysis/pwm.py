@@ -41,6 +41,12 @@ class PwmMeasurement:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
+    @property
+    def period_variation_rms_ns(self) -> float:
+        """Alias representing output-edge period variation RMS under dynamic modulation."""
+        return self.jitter_rms_ns
+
+
 
 def analyze_pwm(
     raw_bytes: bytes,

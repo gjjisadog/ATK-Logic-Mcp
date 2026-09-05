@@ -17,6 +17,8 @@ class CarrierMetrics:
     carrier_is_synchronized: Optional[bool] = None
     carrier_sync_offset_uv_ns: Optional[float] = None
     carrier_sync_offset_vw_ns: Optional[float] = None
+    # Output-edge period variation RMS (measured across output switching edges under modulation;
+    # distinct from internal oscillator clock jitter).
     carrier_jitter_rms_ns: float = 0.0
 
 

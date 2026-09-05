@@ -1,4 +1,5 @@
 #include "atkdl16/sample_store.h"
+#include "atkdl16/json_util.h"
 #include <fstream>
 #include <sstream>
 #include <iomanip>
@@ -253,9 +254,16 @@ std::map<uint8_t, ChannelEdges> SampleStore::extract_all_edges() const {
 }
 
 bool SampleStore::save_to_directory(const std::string& directory_path, const std::string& capture_id, const CaptureResult* result) const {
+    if (directory_path.empty() || capture_id.empty()) {
+        return false;
+    }
     try {
+        std::error_code ec;
         fs::path target_dir = fs::path(directory_path) / capture_id;
-        fs::create_directories(target_dir);
+        fs::create_directories(target_dir, ec);
+        if (ec) {
+            return false;
+        }
 
         // 1. Write binary bit files per channel
         for (const auto& [ch, buf] : m_channel_data) {
@@ -267,13 +275,26 @@ bool SampleStore::save_to_directory(const std::string& directory_path, const std
             if (!out.is_open()) {
                 return false;
             }
-            out.write(reinterpret_cast<const char*>(buf.data()), buf.size());
+            if (!buf.empty()) {
+                out.write(reinterpret_cast<const char*>(buf.data()), buf.size());
+            }
+            out.flush();
+            if (!out.good() || out.fail() || out.bad()) {
+                return false;
+            }
+            out.close();
+            if (out.fail()) {
+                return false;
+            }
         }
 
         // 2. Write edges.json
         auto all_edges = extract_all_edges();
         fs::path edges_path = target_dir / "edges.json";
         std::ofstream edges_out(edges_path);
+        if (!edges_out.is_open()) {
+            return false;
+        }
         edges_out << "{\n";
         bool first_ch = true;
         for (const auto& [ch, ce] : all_edges) {
@@ -292,15 +313,26 @@ bool SampleStore::save_to_directory(const std::string& directory_path, const std
             edges_out << "  }";
         }
         edges_out << "\n}\n";
+        edges_out.flush();
+        if (!edges_out.good() || edges_out.fail() || edges_out.bad()) {
+            return false;
+        }
+        edges_out.close();
+        if (edges_out.fail()) {
+            return false;
+        }
 
         // 3. Write meta.json
         fs::path meta_path = target_dir / "meta.json";
         std::ofstream meta_out(meta_path);
+        if (!meta_out.is_open()) {
+            return false;
+        }
         auto now = std::chrono::system_clock::now();
         std::time_t now_time = std::chrono::system_clock::to_time_t(now);
 
         meta_out << "{\n";
-        meta_out << "  \"capture_id\": \"" << capture_id << "\",\n";
+        meta_out << "  \"capture_id\": \"" << json_escape(capture_id) << "\",\n";
         meta_out << "  \"timestamp\": " << now_time << ",\n";
         meta_out << "  \"mode\": \"" << (m_config.mode == CaptureMode::Buffer ? "buffer" : "stream") << "\",\n";
         meta_out << "  \"sample_rate\": " << m_config.sample_rate << ",\n";
@@ -310,7 +342,7 @@ bool SampleStore::save_to_directory(const std::string& directory_path, const std
         meta_out << "  \"trigger_position_percent\": " << m_config.trigger.position_percent << ",\n";
         if (result) {
             meta_out << "  \"evidence_source\": \"REAL_HARDWARE\",\n";
-            meta_out << "  \"data_integrity\": \"" << to_string(result->data_integrity) << "\",\n";
+            meta_out << "  \"data_integrity\": \"" << json_escape(to_string(result->data_integrity)) << "\",\n";
             meta_out << "  \"requested_samples\": " << result->requested_samples << ",\n";
             meta_out << "  \"actual_samples\": " << result->actual_samples << ",\n";
             meta_out << "  \"trigger_offset\": " << result->trigger_offset << ",\n";
@@ -330,7 +362,7 @@ bool SampleStore::save_to_directory(const std::string& directory_path, const std
         for (const auto& [ch, name] : m_config.channel_names) {
             if (!first_name) meta_out << ",\n";
             first_name = false;
-            meta_out << "    \"" << static_cast<int>(ch) << "\": \"" << name << "\"";
+            meta_out << "    \"" << static_cast<int>(ch) << "\": \"" << json_escape(name) << "\"";
         }
         meta_out << "\n  },\n";
         meta_out << "  \"sample_counts\": {\n";
@@ -342,6 +374,15 @@ bool SampleStore::save_to_directory(const std::string& directory_path, const std
         }
         meta_out << "\n  }\n";
         meta_out << "}\n";
+
+        meta_out.flush();
+        if (!meta_out.good() || meta_out.fail() || meta_out.bad()) {
+            return false;
+        }
+        meta_out.close();
+        if (meta_out.fail()) {
+            return false;
+        }
 
         return true;
     } catch (...) {

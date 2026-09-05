@@ -27,7 +27,7 @@ assertions:
   pwm_carrier:
     target_hz: 16000.0       # 16 kHz TI F28P65 nominal ePWM carrier
     tolerance_hz: 100.0      # +/- 100 Hz
-    max_jitter_rms_ns: 200.0 # ePWM carrier jitter limit under dynamic modulation
+    max_output_edge_period_variation_rms_ns: 200.0 # Output-edge period variation limit under dynamic modulation
     max_carrier_freq_diff_hz: 50.0 # Carrier frequency consistency across phases
 
   duty_cycle:
@@ -50,4 +50,5 @@ assertions:
     fundamental_tolerance_hz: 2.0  # +/- 2.0 Hz tolerance
     phase_shift_target_deg: 120.0  # 120-degree sinusoidal displacement
     phase_shift_tolerance_deg: 15.0
+    phase_sequence: "UVW"
     require_modulation_balance: true

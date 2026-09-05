@@ -23,6 +23,12 @@ class HilSpecError(Exception):
     pass
 
 
+ALLOWED_TOP_KEYS = {"test_suite", "version", "device", "capture", "assertions"}
+ALLOWED_DEVICE_KEYS = {"expected_model", "min_hardware_version"}
+ALLOWED_CAPTURE_KEYS = {
+    "channels", "channel_map", "sample_rate_hz", "duration_ms",
+    "threshold_voltage", "trigger", "mode"
+}
 ALLOWED_ASSERTION_KEYS = {
     "pwm_carrier",
     "duty_cycle",
@@ -30,26 +36,80 @@ ALLOWED_ASSERTION_KEYS = {
     "shoot_through_protection",
     "three_phase_modulation",
 }
+ALLOWED_PWM_CARRIER_KEYS = {
+    "target_hz", "tolerance_hz",
+    "max_output_edge_period_variation_rms_ns", "max_jitter_rms_ns",
+    "max_carrier_freq_diff_hz"
+}
+ALLOWED_DUTY_CYCLE_KEYS = {
+    "mode", "min_allowed_duty", "max_allowed_duty"
+}
+ALLOWED_DEADTIME_KEYS = {
+    "target_ns", "min_allowed_ns", "max_allowed_ns", "target_tolerance_ns"
+}
+ALLOWED_SHOOT_THROUGH_KEYS = {
+    "allow_overlap", "max_overlap_samples"
+}
+ALLOWED_THREE_PHASE_KEYS = {
+    "fundamental_frequency_hz", "fundamental_tolerance_hz",
+    "phase_shift_target_deg", "phase_shift_tolerance_deg",
+    "phase_sequence", "require_modulation_balance"
+}
 
 
 def validate_hil_spec(spec: Dict[str, Any]) -> None:
     """
-    Validate HIL test specification schema and fail-closed against unknown or deprecated keys.
+    Validate HIL test specification schema and fail-closed against unknown, malformed, or deprecated keys.
     """
     if not isinstance(spec, dict):
         raise HilSpecError("HIL specification must be a dictionary")
+
+    for key in spec.keys():
+        if key not in ALLOWED_TOP_KEYS:
+            raise HilSpecError(f"Unknown top-level key '{key}' in HIL spec. Allowed: {sorted(ALLOWED_TOP_KEYS)}")
+
+    if "device" in spec and isinstance(spec["device"], dict):
+        for key in spec["device"].keys():
+            if key not in ALLOWED_DEVICE_KEYS:
+                raise HilSpecError(f"Unknown key '{key}' in 'device' section. Allowed: {sorted(ALLOWED_DEVICE_KEYS)}")
 
     if "capture" not in spec or not isinstance(spec["capture"], dict):
         raise HilSpecError("Missing or invalid 'capture' section in HIL spec")
 
     cap = spec["capture"]
+    for key in cap.keys():
+        if key not in ALLOWED_CAPTURE_KEYS:
+            raise HilSpecError(f"Unknown key '{key}' in 'capture' section. Allowed: {sorted(ALLOWED_CAPTURE_KEYS)}")
+
     mode = cap.get("mode", "buffer")
     if mode != "buffer":
         raise HilSpecError(f"HIL capture mode must be 'buffer', got '{mode}'")
 
-    for req_field in ("channels", "sample_rate_hz", "duration_ms"):
+    for req_field in ("channels", "sample_rate_hz", "duration_ms", "threshold_voltage"):
         if req_field not in cap:
             raise HilSpecError(f"Missing required capture field '{req_field}' in HIL spec")
+
+    channels = cap["channels"]
+    if not isinstance(channels, list) or not channels:
+        raise HilSpecError("'capture.channels' must be a non-empty list of channel numbers")
+    if len(set(channels)) != len(channels):
+        raise HilSpecError("'capture.channels' must contain unique channel numbers")
+    for ch in channels:
+        if not isinstance(ch, int) or ch < 0 or ch > 15:
+            raise HilSpecError(f"Invalid channel number {ch} in 'capture.channels'; must be in range 0..15")
+
+    sr = cap["sample_rate_hz"]
+    if not isinstance(sr, (int, float)) or sr <= 0:
+        raise HilSpecError(f"'capture.sample_rate_hz' must be a positive number, got {sr}")
+
+    dur = cap["duration_ms"]
+    if not isinstance(dur, (int, float)) or dur <= 0:
+        raise HilSpecError(f"'capture.duration_ms' must be a positive number, got {dur}")
+
+    if "threshold_voltage" in cap:
+        th = cap["threshold_voltage"]
+        if not isinstance(th, (int, float)) or th < -5.0 or th > 5.0:
+            raise HilSpecError(f"'capture.threshold_voltage' must be between -5.0V and +5.0V, got {th}")
 
     if "assertions" not in spec or not isinstance(spec["assertions"], dict):
         raise HilSpecError("Missing or invalid 'assertions' section in HIL spec")
@@ -58,12 +118,83 @@ def validate_hil_spec(spec: Dict[str, Any]) -> None:
     if not assertions:
         raise HilSpecError("HIL assertions dictionary is empty")
 
-    for key in assertions.keys():
+    for key, aspec in assertions.items():
         if key not in ALLOWED_ASSERTION_KEYS:
             raise HilSpecError(
                 f"Unknown or deprecated assertion key '{key}' in HIL spec. "
                 f"Allowed keys: {sorted(ALLOWED_ASSERTION_KEYS)}"
             )
+        if not isinstance(aspec, dict):
+            raise HilSpecError(f"Assertion block '{key}' must be a dictionary")
+
+        if key == "pwm_carrier":
+            for k in aspec.keys():
+                if k not in ALLOWED_PWM_CARRIER_KEYS:
+                    raise HilSpecError(f"Unknown key '{k}' in assertions.pwm_carrier. Allowed: {sorted(ALLOWED_PWM_CARRIER_KEYS)}")
+            if "target_hz" not in aspec or not isinstance(aspec["target_hz"], (int, float)) or aspec["target_hz"] <= 0:
+                raise HilSpecError("assertions.pwm_carrier requires positive numeric 'target_hz'")
+            if "tolerance_hz" in aspec and (not isinstance(aspec["tolerance_hz"], (int, float)) or aspec["tolerance_hz"] < 0):
+                raise HilSpecError("assertions.pwm_carrier 'tolerance_hz' must be non-negative numeric")
+
+        elif key == "duty_cycle":
+            for k in aspec.keys():
+                if k not in ALLOWED_DUTY_CYCLE_KEYS:
+                    raise HilSpecError(f"Unknown key '{k}' in assertions.duty_cycle. Allowed: {sorted(ALLOWED_DUTY_CYCLE_KEYS)}")
+            mode = aspec.get("mode", "dynamic_sine_modulation")
+            if mode != "dynamic_sine_modulation":
+                raise HilSpecError(f"assertions.duty_cycle mode must be 'dynamic_sine_modulation', got '{mode}'")
+            min_d = aspec.get("min_allowed_duty", 0.05)
+            max_d = aspec.get("max_allowed_duty", 0.95)
+            if not isinstance(min_d, (int, float)) or not isinstance(max_d, (int, float)):
+                raise HilSpecError("Duty bounds must be numeric")
+            if not (0.0 <= min_d < max_d <= 1.0):
+                raise HilSpecError(f"Duty bounds must satisfy 0.0 <= min_allowed_duty < max_allowed_duty <= 1.0; got [{min_d}, {max_d}]")
+
+        elif key == "deadtime":
+            for k in aspec.keys():
+                if k not in ALLOWED_DEADTIME_KEYS:
+                    raise HilSpecError(f"Unknown key '{k}' in assertions.deadtime. Allowed: {sorted(ALLOWED_DEADTIME_KEYS)}")
+            if "min_allowed_ns" not in aspec or "max_allowed_ns" not in aspec:
+                raise HilSpecError("assertions.deadtime requires both 'min_allowed_ns' and 'max_allowed_ns'")
+            min_dt = aspec["min_allowed_ns"]
+            max_dt = aspec["max_allowed_ns"]
+            if not isinstance(min_dt, (int, float)) or not isinstance(max_dt, (int, float)):
+                raise HilSpecError("Deadtime bounds must be numeric")
+            if not (0.0 <= min_dt <= max_dt):
+                raise HilSpecError(f"Deadtime bounds must satisfy 0.0 <= min_allowed_ns <= max_allowed_ns; got [{min_dt}, {max_dt}]")
+            if "target_ns" in aspec:
+                tgt_dt = aspec["target_ns"]
+                if not isinstance(tgt_dt, (int, float)) or not (min_dt <= tgt_dt <= max_dt):
+                    raise HilSpecError(f"Target deadtime {tgt_dt} ns must be within bounds [{min_dt}, {max_dt}] ns")
+
+        elif key == "shoot_through_protection":
+            for k in aspec.keys():
+                if k not in ALLOWED_SHOOT_THROUGH_KEYS:
+                    raise HilSpecError(f"Unknown key '{k}' in assertions.shoot_through_protection. Allowed: {sorted(ALLOWED_SHOOT_THROUGH_KEYS)}")
+            allow_ov = aspec.get("allow_overlap", False)
+            if not isinstance(allow_ov, bool):
+                raise HilSpecError("assertions.shoot_through_protection 'allow_overlap' must be boolean")
+            max_ov = aspec.get("max_overlap_samples", 0)
+            if not isinstance(max_ov, int) or max_ov < 0:
+                raise HilSpecError("assertions.shoot_through_protection 'max_overlap_samples' must be non-negative integer")
+            if not allow_ov and max_ov != 0:
+                raise HilSpecError("When allow_overlap is False, max_overlap_samples must be 0")
+
+        elif key == "three_phase_modulation":
+            for k in aspec.keys():
+                if k not in ALLOWED_THREE_PHASE_KEYS:
+                    raise HilSpecError(f"Unknown key '{k}' in assertions.three_phase_modulation. Allowed: {sorted(ALLOWED_THREE_PHASE_KEYS)}")
+            for req_field in ("fundamental_frequency_hz", "phase_shift_target_deg", "phase_shift_tolerance_deg"):
+                if req_field not in aspec:
+                    raise HilSpecError(f"Missing required field '{req_field}' in assertions.three_phase_modulation")
+            if not isinstance(aspec["fundamental_frequency_hz"], (int, float)) or aspec["fundamental_frequency_hz"] <= 0:
+                raise HilSpecError("fundamental_frequency_hz must be positive numeric")
+            if not isinstance(aspec["phase_shift_target_deg"], (int, float)) or aspec["phase_shift_target_deg"] <= 0:
+                raise HilSpecError("phase_shift_target_deg must be positive numeric")
+            if not isinstance(aspec["phase_shift_tolerance_deg"], (int, float)) or aspec["phase_shift_tolerance_deg"] < 0:
+                raise HilSpecError("phase_shift_tolerance_deg must be non-negative numeric")
+            if "phase_sequence" in aspec and aspec["phase_sequence"] not in ("UVW", "UWV"):
+                raise HilSpecError(f"Invalid phase_sequence '{aspec['phase_sequence']}'; allowed values: UVW, UWV")
 
 
 def run_dk9_hil_test(yaml_path: str = "tests/hil/dk9_openloop_pwm.yaml", dry_run: bool = False) -> dict:
@@ -167,6 +298,16 @@ def run_dk9_hil_test(yaml_path: str = "tests/hil/dk9_openloop_pwm.yaml", dry_run
         report["reason"] = f"ATK-DL16 device not ready for capture: {status.get('message', 'Device cannot be opened')}"
         return report
 
+    # Verify expected device model
+    exp_model = spec.get("device", {}).get("expected_model")
+    if exp_model:
+        dev_model = status.get("model_name", status.get("model", status.get("device_name", "")))
+        if dev_model and exp_model.lower() not in dev_model.lower():
+            report["status"] = "HIL_NOT_RUN"
+            report["evidence_source"] = "NONE"
+            report["reason"] = f"Connected device model '{dev_model}' does not match expected '{exp_model}' (UNSUPPORTED_DEVICE)"
+            return report
+
     # Hardware is ready, execute REAL physical capture
     print(f"[HIL] Triggering physical capture on channels {spec['capture']['channels']}...")
     cap_res = logic_capture(
@@ -199,6 +340,7 @@ def run_dk9_hil_test(yaml_path: str = "tests/hil/dk9_openloop_pwm.yaml", dry_run
     cap_id = cap_res["capture_id"]
     report["capture_id"] = cap_id
     report["evidence_source"] = cap_res.get("evidence_source", "REAL_HARDWARE")
+    report["data_integrity"] = integrity
     sr = float(spec["capture"]["sample_rate_hz"])
 
     # Load captured channel samples
@@ -230,7 +372,7 @@ def run_dk9_hil_test(yaml_path: str = "tests/hil/dk9_openloop_pwm.yaml", dry_run
 
         target_hz = aspec.get("target_hz")
         tol_hz = aspec.get("tolerance_hz", 100.0)
-        max_jitter_ns = aspec.get("max_jitter_rms_ns")
+        max_jitter_ns = aspec.get("max_output_edge_period_variation_rms_ns", aspec.get("max_jitter_rms_ns"))
         max_carrier_freq_diff_hz = aspec.get("max_carrier_freq_diff_hz")
 
         for ch in spec["capture"]["channels"]:
@@ -256,11 +398,11 @@ def run_dk9_hil_test(yaml_path: str = "tests/hil/dk9_openloop_pwm.yaml", dry_run
             if max_jitter_ns is not None:
                 if meas.jitter_rms_ns <= max_jitter_ns:
                     rec["details"].append(
-                        f"CH{ch} Carrier Jitter RMS {meas.jitter_rms_ns:.2f} ns <= {max_jitter_ns} ns - PASS"
+                        f"CH{ch} Output-Edge Period Variation RMS {meas.jitter_rms_ns:.2f} ns <= {max_jitter_ns} ns - PASS"
                     )
                 else:
                     carrier_pass = False
-                    msg = f"CH{ch} Carrier Jitter RMS {meas.jitter_rms_ns:.2f} ns exceeds limit {max_jitter_ns} ns"
+                    msg = f"CH{ch} Output-Edge Period Variation RMS {meas.jitter_rms_ns:.2f} ns exceeds limit {max_jitter_ns} ns"
                     rec["failures"].append(msg)
                     report["failures"].append(msg)
 
@@ -350,13 +492,16 @@ def run_dk9_hil_test(yaml_path: str = "tests/hil/dk9_openloop_pwm.yaml", dry_run
                     continue
 
                 if min_dt is not None and max_dt is not None:
-                    if min_dt <= pair.deadtime_min_ns <= max_dt:
+                    if pair.deadtime_min_ns >= min_dt and pair.deadtime_max_ns <= max_dt:
                         rec["details"].append(
-                            f"Phase {p_name} Deadtime {pair.deadtime_min_ns:.1f} ns in range [{min_dt}, {max_dt}] ns - PASS"
+                            f"Phase {p_name} Deadtime range [{pair.deadtime_min_ns:.1f}, {pair.deadtime_max_ns:.1f}] ns within [{min_dt}, {max_dt}] ns - PASS"
                         )
                     else:
                         dt_pass = False
-                        msg = f"Phase {p_name} Deadtime {pair.deadtime_min_ns:.1f} ns outside [{min_dt}, {max_dt}] ns"
+                        msg = (
+                            f"Phase {p_name} Deadtime span [{pair.deadtime_min_ns:.1f}, {pair.deadtime_max_ns:.1f}] ns "
+                            f"outside allowed limits [{min_dt}, {max_dt}] ns"
+                        )
                         rec["failures"].append(msg)
                         report["failures"].append(msg)
 
@@ -419,6 +564,7 @@ def run_dk9_hil_test(yaml_path: str = "tests/hil/dk9_openloop_pwm.yaml", dry_run
             fund_tol = tspec.get("fundamental_tolerance_hz", 2.0)
             phase_tol = tspec.get("phase_shift_tolerance_deg", 15.0)
             req_bal = tspec.get("require_modulation_balance", True)
+            phase_seq = tspec.get("phase_sequence")
 
             if abs(tri.modulation.fundamental_frequency_hz - fund_target) <= fund_tol:
                 rec["details"].append(
@@ -447,6 +593,24 @@ def run_dk9_hil_test(yaml_path: str = "tests/hil/dk9_openloop_pwm.yaml", dry_run
                 rec["failures"].append(msg)
                 report["failures"].append(msg)
 
+            if phase_seq is not None:
+                if phase_seq == "UVW":
+                    uv_ok = abs(tri.modulation.phase_shift_uv_deg - 120.0) <= phase_tol
+                    vw_ok = abs(tri.modulation.phase_shift_vw_deg - 120.0) <= phase_tol
+                    if uv_ok and vw_ok:
+                        rec["details"].append(
+                            f"Three-Phase Sequence UVW verified (shift_uv={tri.modulation.phase_shift_uv_deg:.1f}°, shift_vw={tri.modulation.phase_shift_vw_deg:.1f}°) - PASS"
+                        )
+                    else:
+                        tp_pass = False
+                        msg = (
+                            f"Three-Phase sequence mismatch: expected UVW (~120°, ~120°), "
+                            f"observed shift_uv={tri.modulation.phase_shift_uv_deg:.1f}°, shift_vw={tri.modulation.phase_shift_vw_deg:.1f}°"
+                        )
+                        rec["failures"].append(msg)
+                        report["failures"].append(msg)
+                        report["reason"] = "PHASE_SEQUENCE_MISMATCH"
+
         rec["passed"] = tp_pass
         if tp_pass:
             report["passed_assertions"] += 1
@@ -465,7 +629,10 @@ def run_dk9_hil_test(yaml_path: str = "tests/hil/dk9_openloop_pwm.yaml", dry_run
         report["failures"].append(report["reason"])
     elif not all_passed or report["failed_assertions"] > 0:
         report["status"] = "HIL_FAIL"
-        report["reason"] = "One or more HIL assertions failed"
+        if any("sequence mismatch" in f.lower() for f in report["failures"]):
+            report["reason"] = "PHASE_SEQUENCE_MISMATCH"
+        elif not report.get("reason"):
+            report["reason"] = "One or more HIL assertions failed"
     else:
         report["status"] = "HIL_PASS"
         report["reason"] = "All assertions executed and passed successfully"

@@ -2,6 +2,7 @@
 #include "atkdl16/capture.h"
 #include "atkdl16/capability.h"
 #include "atkdl16/sample_store.h"
+#include "atkdl16/json_util.h"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -161,15 +162,13 @@ int main(int argc, char* argv[]) {
         auto err = dev.open();
         if (!err) {
             if (json_mode) {
-                std::cout << "{\n"
-                          << "  \"success\": false,\n"
-                          << "  \"error_code\": \"" << to_string(err.code) << "\",\n"
-                          << "  \"message\": \"" << err.message << "\",\n"
-                          << "  \"evidence_source\": \"REAL_HARDWARE\",\n"
-                          << "  \"data_integrity\": \"UNKNOWN\",\n"
-                          << "  \"capture_complete_received\": false,\n"
-                          << "  \"warnings\": []\n"
-                          << "}\n";
+                CaptureResult open_err_res;
+                open_err_res.success = false;
+                open_err_res.error_code = err.code;
+                open_err_res.error_message = err.message;
+                open_err_res.data_integrity = DataIntegrity::Unknown;
+                open_err_res.capture_complete_received = false;
+                std::cout << serialize_capture_result_json(open_err_res, out_dir);
             } else {
                 std::cerr << "Failed to open device: " << err.message << "\n";
             }
@@ -199,51 +198,8 @@ int main(int argc, char* argv[]) {
         }
 
         if (json_mode) {
-            if (!result.success) {
-                std::cout << "{\n"
-                          << "  \"success\": false,\n"
-                          << "  \"error_code\": \"" << to_string(result.error_code) << "\",\n"
-                          << "  \"message\": \"" << result.error_message << "\",\n"
-                          << "  \"evidence_source\": \"REAL_HARDWARE\",\n"
-                          << "  \"data_integrity\": \"" << to_string(result.data_integrity) << "\",\n"
-                          << "  \"capture_complete_received\": " << (result.capture_complete_received ? "true" : "false") << ",\n"
-                          << "  \"warnings\": [";
-                for (size_t i = 0; i < result.warnings.size(); ++i) {
-                    std::cout << "\"" << result.warnings[i] << "\"";
-                    if (i + 1 < result.warnings.size()) std::cout << ", ";
-                }
-                std::cout << "]\n}\n";
-                return 1;
-            } else {
-                std::cout << "{\n"
-                          << "  \"success\": true,\n"
-                          << "  \"capture_id\": \"" << result.capture_id << "\",\n"
-                          << "  \"evidence_source\": \"REAL_HARDWARE\",\n"
-                          << "  \"data_integrity\": \"" << to_string(result.data_integrity) << "\",\n"
-                          << "  \"requested_samples\": " << result.requested_samples << ",\n"
-                          << "  \"minimum_actual_samples\": " << result.minimum_actual_samples << ",\n"
-                          << "  \"actual_samples_per_channel\": {\n";
-                bool first_ch = true;
-                for (const auto& [ch, cnt] : result.actual_samples_per_channel) {
-                    if (!first_ch) std::cout << ",\n";
-                    first_ch = false;
-                    std::cout << "    \"" << static_cast<int>(ch) << "\": " << cnt;
-                }
-                std::cout << "\n  },\n"
-                          << "  \"trigger_ack_received\": " << (result.trigger_ack_received ? "true" : "false") << ",\n"
-                          << "  \"trigger_offset_received\": " << (result.trigger_offset_received ? "true" : "false") << ",\n"
-                          << "  \"capture_complete_received\": " << (result.capture_complete_received ? "true" : "false") << ",\n"
-                          << "  \"capacity_exceeded\": " << (result.capacity_exceeded ? "true" : "false") << ",\n"
-                          << "  \"bandwidth_exceeded\": " << (result.bandwidth_exceeded ? "true" : "false") << ",\n"
-                          << "  \"artifact_dir\": \"" << out_dir << "/" << result.capture_id << "\",\n"
-                          << "  \"warnings\": [";
-                for (size_t i = 0; i < result.warnings.size(); ++i) {
-                    std::cout << "\"" << result.warnings[i] << "\"";
-                    if (i + 1 < result.warnings.size()) std::cout << ", ";
-                }
-                std::cout << "]\n}\n";
-                return 0;
-            }
+            std::cout << serialize_capture_result_json(result, out_dir);
+            return result.success ? 0 : 1;
         }
 
         if (!result.success) {

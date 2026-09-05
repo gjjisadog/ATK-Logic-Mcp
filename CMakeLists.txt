@@ -41,6 +41,7 @@ add_library(atkdl16_core STATIC
     core/src/usb_transport.cpp
     core/src/device.cpp
     core/src/capture.cpp
+    core/src/json_util.cpp
 )
 
 target_include_directories(atkdl16_core PUBLIC

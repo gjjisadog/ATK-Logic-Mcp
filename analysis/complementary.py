@@ -18,6 +18,7 @@ class ComplementaryMeasurement:
     falling_deadtime_min_ns: float
     falling_deadtime_max_ns: float
     deadtime_min_ns: float
+    deadtime_max_ns: float
     has_overlap: bool
     overlap_count: int
     max_overlap_duration_ns: float
@@ -61,7 +62,7 @@ def analyze_complementary_pair(
             pwm_high=pwm_h, pwm_low=pwm_l,
             rising_deadtime_mean_ns=0.0, rising_deadtime_min_ns=0.0, rising_deadtime_max_ns=0.0,
             falling_deadtime_mean_ns=0.0, falling_deadtime_min_ns=0.0, falling_deadtime_max_ns=0.0,
-            deadtime_min_ns=0.0, has_overlap=False, overlap_count=0,
+            deadtime_min_ns=0.0, deadtime_max_ns=0.0, has_overlap=False, overlap_count=0,
             max_overlap_duration_ns=0.0, missing_pulse_count=0, extra_edge_count=0,
             pairing_error_count=0, shoot_through_risk=False,
             valid=False, message="Empty sample buffers"
@@ -144,6 +145,7 @@ def analyze_complementary_pair(
 
     all_dts = dt_rising_ns + dt_falling_ns
     min_dt = float(np.min(all_dts)) if all_dts else 0.0
+    max_dt = float(np.max(all_dts)) if all_dts else 0.0
 
     dt_r_mean = float(np.mean(dt_rising_ns)) if dt_rising_ns else 0.0
     dt_r_min = float(np.min(dt_rising_ns)) if dt_rising_ns else 0.0
@@ -178,6 +180,7 @@ def analyze_complementary_pair(
         falling_deadtime_min_ns=dt_f_min,
         falling_deadtime_max_ns=dt_f_max,
         deadtime_min_ns=min_dt,
+        deadtime_max_ns=max_dt,
         has_overlap=has_overlap,
         overlap_count=overlap_count,
         max_overlap_duration_ns=max_overlap_ns,
