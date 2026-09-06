@@ -76,6 +76,26 @@ def cmd_install(client: str):
 
     print(f"[OK] Successfully installed ATK-DL16 MCP configuration to {client}!")
     print(f"     Configuration file: {target_path}")
+
+    # Also handle Codex config.toml if present
+    if client.lower() == "codex":
+        toml_path = Path.home() / ".codex" / "config.toml"
+        if toml_path.exists():
+            try:
+                content = toml_path.read_text(encoding="utf-8")
+                if "[mcp_servers.atk-dl16]" not in content:
+                    toml_entry = (
+                        f"\n[mcp_servers.atk-dl16]\n"
+                        f"command = '{sys.executable}'\n"
+                        f"args = ['-m', 'atk_dl16_mcp']\n\n"
+                        f"[mcp_servers.atk-dl16.env]\n"
+                        f"PYTHONPATH = '{ROOT_DIR}'\n"
+                    )
+                    toml_path.write_text(content + toml_entry, encoding="utf-8")
+                    print(f"[OK] Also updated Codex TOML configuration: {toml_path}")
+            except Exception as ex:
+                print(f"[Warning] Could not update {toml_path}: {ex}")
+
     print("     Configuration content:")
     print(json.dumps({"atk-dl16": snippet["atk-dl16"]}, indent=2))
     return 0
