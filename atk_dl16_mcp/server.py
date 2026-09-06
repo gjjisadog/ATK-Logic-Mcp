@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -23,6 +24,17 @@ CLI_PATH = ROOT_DIR / "build" / "Release" / "atk-dl16.exe"
 
 
 def _find_cli() -> Optional[Path]:
+    # 1. Check explicit environment override
+    env_cli = os.environ.get("ATK_DL16_CLI")
+    if env_cli and Path(env_cli).exists():
+        return Path(env_cli)
+
+    # 2. Check bundled package binary (for pip/uv/wheel installs)
+    pkg_bin = Path(__file__).resolve().parent / "bin" / "atk-dl16.exe"
+    if pkg_bin.exists():
+        return pkg_bin
+
+    # 3. Check local build directory
     if CLI_PATH.exists():
         return CLI_PATH
     cand = ROOT_DIR / "build" / "atk-dl16.exe"
@@ -31,6 +43,12 @@ def _find_cli() -> Optional[Path]:
     cand2 = ROOT_DIR / "bin" / "atk-dl16.exe"
     if cand2.exists():
         return cand2
+
+    # 4. Check system PATH
+    which_bin = shutil.which("atk-dl16.exe") or shutil.which("atk-dl16")
+    if which_bin:
+        return Path(which_bin)
+
     return None
 
 

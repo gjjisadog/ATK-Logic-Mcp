@@ -140,9 +140,58 @@ Device Information:
 
 ---
 
-## 5. MCP Server Integration
+## 5. MCP Server Integration & One-Click Install
 
-To connect the ATK-DL16 MCP server to Claude Desktop or Antigravity, add the following to your `mcp_servers` configuration:
+### 5.1 One-Click Installation (Codex, Claude Desktop, Cursor)
+
+The package includes a one-click automated installer that installs dependencies, registers the `atk-dl16-mcp` command, embeds the prebuilt static CLI binary, and automatically writes the MCP configuration:
+
+#### Option A: PowerShell One-Click Install (Windows)
+```powershell
+# Auto-configure Codex
+.\install.ps1 -Client codex
+
+# Auto-configure Claude Desktop
+.\install.ps1 -Client claude
+
+# Auto-configure Cursor
+.\install.ps1 -Client cursor
+```
+
+#### Option B: Python Cross-Platform Install
+```bash
+python install.py --client codex    # or claude, cursor
+```
+
+#### Option C: Standard Pip Install & Configuration
+```bash
+pip install -e .
+
+# Inspect connected hardware
+atk-dl16-mcp status
+
+# Inject configuration into Codex / Claude / Cursor
+atk-dl16-mcp install --client codex
+
+# Or print standard JSON snippet to copy-paste
+atk-dl16-mcp config --client codex
+```
+
+### 5.2 Manual Configuration Snippet
+
+Add the following block to your client's MCP configuration file (e.g. `~/.codex/config.json`, `%APPDATA%\Claude\claude_desktop_config.json`, or `.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "atk-dl16": {
+      "command": "atk-dl16-mcp"
+    }
+  }
+}
+```
+
+Or invoke via Python module:
 
 ```json
 {
@@ -150,11 +199,9 @@ To connect the ATK-DL16 MCP server to Claude Desktop or Antigravity, add the fol
     "atk-dl16": {
       "command": "python",
       "args": [
-        "F:/Project/ATK-Logic-Mcp/run_mcp_server.py"
-      ],
-      "env": {
-        "PYTHONPATH": "F:/Project/ATK-Logic-Mcp"
-      }
+        "-m",
+        "atk_dl16_mcp"
+      ]
     }
   }
 }

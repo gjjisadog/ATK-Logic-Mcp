@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atk-dl16-mcp"
+version = "1.0.0"
+description = "Headless Logic Analyzer Control & High-Integrity Analysis MCP Server for ATK-DL16 / DL16 Plus"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-3.0" }
+authors = [
+    { name = "gjjisadog" }
+]
+keywords = ["logic-analyzer", "mcp", "dl16", "hardware-in-the-loop", "pwm", "hil"]
+dependencies = [
+    "numpy>=1.24.0",
+    "mcp>=1.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+]
+
+[project.scripts]
+atk-dl16-mcp = "atk_dl16_mcp.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["atk_dl16_mcp*", "analysis*"]
+
+[tool.setuptools.package-data]
+atk_dl16_mcp = ["bin/*"]
