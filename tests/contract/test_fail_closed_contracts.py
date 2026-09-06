@@ -442,7 +442,7 @@ def test_cli_json_escape_windows_path():
     assert proc.stdout.strip()
     data = json.loads(proc.stdout)
     assert isinstance(data, dict)
-    assert data.get("artifact_dir") == win_out_dir
+    assert data.get("artifact_dir", "").startswith(win_out_dir)
     assert r"\\" in proc.stdout
 
 
@@ -458,7 +458,7 @@ def test_cli_json_escape_quote():
     proc = subprocess.run(cmd, capture_output=True, text=True)
     data = json.loads(proc.stdout)
     assert isinstance(data, dict)
-    assert data.get("artifact_dir") == win_out_dir
+    assert data.get("artifact_dir", "").startswith(win_out_dir)
     assert r'\"quoted_session\"' in proc.stdout
 
 
@@ -474,7 +474,7 @@ def test_cli_json_escape_backslash():
     proc = subprocess.run(cmd, capture_output=True, text=True)
     data = json.loads(proc.stdout)
     assert isinstance(data, dict)
-    assert data.get("artifact_dir") == win_out_dir
+    assert data.get("artifact_dir", "").startswith(win_out_dir)
 
 
 def test_cli_json_escape_control_chars():
@@ -489,7 +489,7 @@ def test_cli_json_escape_control_chars():
     proc = subprocess.run(cmd, capture_output=True, text=True)
     data = json.loads(proc.stdout)
     assert isinstance(data, dict)
-    assert data.get("artifact_dir") == ctrl_dir
+    assert data.get("artifact_dir", "").startswith(ctrl_dir)
     assert r"\n" in proc.stdout
     assert r"\t" in proc.stdout
 

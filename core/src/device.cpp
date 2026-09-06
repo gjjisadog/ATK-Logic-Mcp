@@ -2,6 +2,8 @@
 #include "atkdl16/rx_parser.h"
 #include "atkdl16/protocol.h"
 #include <iostream>
+#include <sstream>
+#include <iomanip>
 #include <thread>
 #include <chrono>
 #include <cstring>
@@ -97,6 +99,8 @@ Error Device::query_info(DeviceInfo& info) {
         return {ErrorCode::DeviceDisconnected, "Device not open", false, "Open device first"};
     }
 
+    flush_buffers();
+
     // 1. Query MCU Version
     uint8_t mcu_cmd[512] = {0};
     mcu_cmd[0] = 0x0A;
@@ -121,7 +125,13 @@ Error Device::query_info(DeviceInfo& info) {
         info.hardware_version = static_cast<int>(mcu_resp[6]);
         info.model = (info.device_level == 1) ? DeviceModel::DL16Plus : DeviceModel::DL16;
     } else {
-        return {ErrorCode::ProtocolError, "Invalid MCU version header", true, "Check device firmware"};
+        std::ostringstream ss;
+        ss << "Invalid MCU version header: len=" << actual_len << " bytes=[";
+        for (size_t i = 0; i < std::min(actual_len, size_t{16}); ++i) {
+            ss << "0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(mcu_resp[i]) << " ";
+        }
+        ss << "]";
+        return {ErrorCode::ProtocolError, ss.str(), true, "Check device firmware"};
     }
 
     // 2. Pulse Reset State on FPGA (Upstream sequence: SetResetState(0) then SetResetState(1))
@@ -130,49 +140,63 @@ Error Device::query_info(DeviceInfo& info) {
     reset_cmd[1] = static_cast<uint8_t>(CommandCode::FpgaResetActive);
     reset_cmd[2] = 0x00;
     m_transport->write_bulk(EP_BULK_OUT, reset_cmd, sizeof(reset_cmd), 50);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     reset_cmd[2] = 0x01;
     m_transport->write_bulk(EP_BULK_OUT, reset_cmd, sizeof(reset_cmd), 50);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
     // Flush leftover sync bytes
     flush_buffers();
 
-    // 3. Query FPGA Device Information (Command 0x10)
-    err = m_transport->send_command(CommandCode::GetDeviceData);
-    if (!err) {
-        return err;
-    }
-
-    std::vector<uint8_t> raw_resp(2048, 0);
-    std::vector<uint8_t> conv_resp(2048, 0);
-    actual_len = 0;
-    err = m_transport->read_bulk(EP_BULK_IN, raw_resp.data(), raw_resp.size(), actual_len, 300);
-    if (!err || actual_len < 2048) {
-        return {ErrorCode::ProtocolError, "FPGA device info response timed out or incomplete", true, "Check USB link"};
-    }
-
-    // Deinterleave the 2048-byte block
-    convert_to_pc(raw_resp.data(), conv_resp.data(), 2048);
-
-    // Parse with RxParser
-    RxParser parser;
-    parser.push_bytes(conv_resp.data(), actual_len);
-
+    // 3. Query FPGA Device Information (Command 0x10) with retry
     bool found_info = false;
-    while (parser.has_message()) {
-        auto msg = parser.pop_message();
-        if (msg && msg->type == RxMessageType::DeviceInfo) {
-            auto dev_info_opt = RxParser::parse_device_info(*msg);
-            if (dev_info_opt && dev_info_opt->fpga_status_ok) {
-                info.usb_speed = dev_info_opt->usb_speed;
-                info.fpga_firmware_version = dev_info_opt->fpga_version;
-                info.model_name = dev_info_opt->model_name;
-                if (info.device_level == 1 && info.model_name.find("Plus") == std::string::npos) {
-                    info.model_name += " Plus";
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        if (attempt > 0) {
+            reset_cmd[2] = 0x01;
+            m_transport->write_bulk(EP_BULK_OUT, reset_cmd, sizeof(reset_cmd), 50);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            flush_buffers();
+        }
+
+        err = m_transport->send_command(CommandCode::GetDeviceData);
+        if (!err) {
+            continue;
+        }
+
+        std::vector<uint8_t> raw_resp(2048, 0);
+        std::vector<uint8_t> conv_resp(2048, 0);
+        actual_len = 0;
+        err = m_transport->read_bulk(EP_BULK_IN, raw_resp.data(), raw_resp.size(), actual_len, 300);
+        if (!err || actual_len < 2048) {
+            continue;
+        }
+
+        // Deinterleave the 2048-byte block
+        convert_to_pc(raw_resp.data(), conv_resp.data(), 2048);
+
+        // Parse with RxParser
+        RxParser parser;
+        parser.push_bytes(conv_resp.data(), actual_len);
+
+        while (parser.has_message()) {
+            auto msg = parser.pop_message();
+            if (msg && msg->type == RxMessageType::DeviceInfo) {
+                auto dev_info_opt = RxParser::parse_device_info(*msg);
+                if (dev_info_opt && dev_info_opt->fpga_status_ok) {
+                    info.usb_speed = dev_info_opt->usb_speed;
+                    info.fpga_firmware_version = dev_info_opt->fpga_version;
+                    info.model_name = dev_info_opt->model_name;
+                    if (info.device_level == 1 && info.model_name.find("Plus") == std::string::npos) {
+                        info.model_name += " Plus";
+                    }
+                    found_info = true;
+                    break;
                 }
-                found_info = true;
-                break;
             }
+        }
+        if (found_info) {
+            break;
         }
     }
 

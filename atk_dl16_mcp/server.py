@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import json
 import subprocess
 from pathlib import Path
@@ -171,19 +172,21 @@ def logic_status() -> Dict[str, Any]:
     if not cli:
         return {"connected": False, "error": "CLI executable atk-dl16.exe not built yet"}
 
-    # Run list
-    p_list = subprocess.run([str(cli), "list"], capture_output=True, text=True)
-    if p_list.returncode != 0 or "0 found" in p_list.stdout:
-        return {
-            "connected": False,
-            "device_count": 0,
-            "message": "No ATK-DL16 device detected on USB bus. Ensure device is plugged in."
-        }
-
-    # Run info
+    # Run info directly with a single device connection
     p_info = subprocess.run([str(cli), "info"], capture_output=True, text=True)
     if p_info.returncode != 0:
+        # Retry once after brief settle in case USB bus was settling from previous operation
+        time.sleep(0.3)
+        p_info = subprocess.run([str(cli), "info"], capture_output=True, text=True)
+
+    if p_info.returncode != 0:
         err_msg = p_info.stderr.strip() or p_info.stdout.strip()
+        if "No ATK-DL16" in err_msg or "DeviceDisconnected" in err_msg or "not found" in err_msg.lower():
+            return {
+                "connected": False,
+                "device_count": 0,
+                "message": "No ATK-DL16 device detected on USB bus. Ensure device is plugged in."
+            }
         is_busy = "in use" in err_msg or "claimed" in err_msg or "DeviceBusy" in err_msg
         return {
             "connected": True,

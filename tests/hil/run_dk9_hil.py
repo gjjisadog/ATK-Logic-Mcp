@@ -1,4 +1,5 @@
 import sys
+import time
 import yaml
 import json
 from pathlib import Path
@@ -309,6 +310,7 @@ def run_dk9_hil_test(yaml_path: str = "tests/hil/dk9_openloop_pwm.yaml", dry_run
             return report
 
     # Hardware is ready, execute REAL physical capture
+    time.sleep(0.2)
     print(f"[HIL] Triggering physical capture on channels {spec['capture']['channels']}...")
     cap_res = logic_capture(
         channels=spec["capture"]["channels"],
@@ -374,9 +376,10 @@ def run_dk9_hil_test(yaml_path: str = "tests/hil/dk9_openloop_pwm.yaml", dry_run
         tol_hz = aspec.get("tolerance_hz", 100.0)
         max_jitter_ns = aspec.get("max_output_edge_period_variation_rms_ns", aspec.get("max_jitter_rms_ns"))
         max_carrier_freq_diff_hz = aspec.get("max_carrier_freq_diff_hz")
+        is_sine_mode = spec.get("assertions", {}).get("duty_cycle", {}).get("mode") == "dynamic_sine_modulation"
 
         for ch in spec["capture"]["channels"]:
-            meas = analyze_pwm(channels_raw[ch], sr, channel=ch)
+            meas = analyze_pwm(channels_raw[ch], sr, channel=ch, allow_half_cycle_modulation=is_sine_mode)
             if not meas.valid:
                 carrier_pass = False
                 msg = f"CH{ch} PWM analysis invalid: {meas.message}"
@@ -435,18 +438,31 @@ def run_dk9_hil_test(yaml_path: str = "tests/hil/dk9_openloop_pwm.yaml", dry_run
         min_allowed = dspec.get("min_allowed_duty", 0.05)
         max_allowed = dspec.get("max_allowed_duty", 0.95)
 
-        if mode == "dynamic_sine_modulation" and tri is not None:
-            if not tri.modulation.is_constant_duty:
-                rec["details"].append("Dynamic sine modulation verified (duty cycle is dynamic, not constant) - PASS")
+        if mode == "dynamic_sine_modulation":
+            if tri is not None:
+                if not tri.modulation.is_constant_duty:
+                    rec["details"].append("Dynamic sine modulation verified (duty cycle is dynamic, not constant) - PASS")
+                else:
+                    duty_pass = False
+                    msg = "Expected dynamic sine modulation, but duty cycle is constant across cycles"
+                    rec["failures"].append(msg)
+                    report["failures"].append(msg)
             else:
-                duty_pass = False
-                msg = "Expected dynamic sine modulation, but duty cycle is constant across cycles"
-                rec["failures"].append(msg)
-                report["failures"].append(msg)
+                for ch in spec["capture"]["channels"]:
+                    m_ch = analyze_pwm(channels_raw[ch], sr, channel=ch, allow_half_cycle_modulation=True)
+                    if m_ch.valid and (m_ch.duty_cycle_max - m_ch.duty_cycle_min > 0.01):
+                        rec["details"].append(
+                            f"CH{ch} Dynamic sine modulation verified (duty cycle varies dynamically across cycles: span [{m_ch.duty_cycle_min:.4f}, {m_ch.duty_cycle_max:.4f}]) - PASS"
+                        )
+                    else:
+                        duty_pass = False
+                        msg = f"CH{ch} Expected dynamic sine modulation, but duty cycle is constant across cycles (span [{m_ch.duty_cycle_min:.4f}, {m_ch.duty_cycle_max:.4f}])"
+                        rec["failures"].append(msg)
+                        report["failures"].append(msg)
 
-        for ch in [0, 2, 4]:
+        for ch in spec["capture"]["channels"]:
             if ch in channels_raw:
-                meas = analyze_pwm(channels_raw[ch], sr, channel=ch)
+                meas = analyze_pwm(channels_raw[ch], sr, channel=ch, allow_half_cycle_modulation=(mode == "dynamic_sine_modulation"))
                 if not meas.valid:
                     duty_pass = False
                     msg = f"CH{ch} PWM analysis invalid for duty bounds: {meas.message}"

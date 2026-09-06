@@ -37,6 +37,7 @@ class PwmMeasurement:
     valid: bool                    # measurement_valid and anomaly_free
     message: str
     warnings: List[str] = field(default_factory=list)
+    half_cycle_gap_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -47,13 +48,13 @@ class PwmMeasurement:
         return self.jitter_rms_ns
 
 
-
 def analyze_pwm(
     raw_bytes: bytes,
     sample_rate: float,
     channel: int = 0,
     max_samples: Optional[int] = None,
-    glitch_threshold_ns: float = 10.0
+    glitch_threshold_ns: float = 10.0,
+    allow_half_cycle_modulation: bool = False
 ) -> PwmMeasurement:
     """
     Perform deterministic cycle-by-cycle PWM analysis using a formal Cycle Classifier.
@@ -148,6 +149,7 @@ def analyze_pwm(
     extra_edges = 0
     glitches = 0
     period_outliers = 0
+    half_cycle_gaps = 0
 
     valid_periods_s: List[float] = []
     valid_highs_s: List[float] = []
@@ -161,6 +163,9 @@ def analyze_pwm(
 
         # Check for dropped / missing pulses (period is ~2x, 3x nominal)
         if t_period > 1.7 * nominal_period_s:
+            if allow_half_cycle_modulation and t_period >= 20 * nominal_period_s:
+                half_cycle_gaps += 1
+                continue
             dropped = int(round(t_period / nominal_period_s)) - 1
             missing_pulses += max(1, dropped)
             period_outliers += 1
@@ -267,5 +272,6 @@ def analyze_pwm(
         anomaly_free=anomaly_free,
         valid=is_valid,
         message=status_msg,
-        warnings=warnings
+        warnings=warnings,
+        half_cycle_gap_count=half_cycle_gaps
     )

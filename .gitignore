@@ -35,3 +35,6 @@ captures/
 upstream/
 third_party/libusb/*.7z
 third_party/libusb/*.tar.*
+
+# Local scratch
+scratch/
