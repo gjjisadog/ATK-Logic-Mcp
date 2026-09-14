@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "atk-dl16-mcp"
-version = "1.0.0"
+version = "1.1.0"
 description = "Headless Logic Analyzer Control & High-Integrity Analysis MCP Server for ATK-DL16 / DL16 Plus"
 readme = "README.md"
 requires-python = ">=3.9"

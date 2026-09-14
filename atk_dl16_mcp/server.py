@@ -11,6 +11,11 @@ from typing import List, Dict, Any, Optional
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
+# Source checkouts keep the historical layout. Offline/portable installs can
+# point runtime artifacts at a writable directory without moving the bundled
+# analysis fixtures or CLI discovery root.
+DATA_DIR = Path(os.environ.get("ATK_DL16_DATA_DIR", str(ROOT_DIR))).expanduser().resolve()
+
 from mcp.server.mcpserver import MCPServer
 from analysis.edge import bit_to_samples, extract_edges
 from analysis.pwm import analyze_pwm
@@ -73,10 +78,15 @@ def _load_capture_channel_bits(capture_id: str, channel: int) -> tuple[bytes, di
     """Helper to load channel raw bits and meta from capture directory or .atkdl archive."""
     cap_path = Path(capture_id)
     if not cap_path.exists():
-        if (ROOT_DIR / capture_id).exists():
-            cap_path = ROOT_DIR / capture_id
-        elif (ROOT_DIR / "captures" / capture_id).exists():
-            cap_path = ROOT_DIR / "captures" / capture_id
+        for base_dir in (DATA_DIR, ROOT_DIR):
+            candidate = base_dir / capture_id
+            if candidate.exists():
+                cap_path = candidate
+                break
+            candidate = base_dir / "captures" / capture_id
+            if candidate.exists():
+                cap_path = candidate
+                break
 
     # Case 1: .atkdl archive
     if cap_path.suffix.lower() == ".atkdl":
@@ -251,7 +261,7 @@ def logic_capture(
         }
 
     ch_str = ",".join(str(c) for c in channels)
-    out_dir = str(ROOT_DIR / "captures")
+    out_dir = str(DATA_DIR / "captures")
 
     cmd = [
         str(cli), "capture",

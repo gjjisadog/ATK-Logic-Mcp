@@ -6,7 +6,7 @@ Derived from the official [alientek-openedv/atk-logic](https://github.com/alient
 1. A modern, safe C++17 core library (`libatkdl16_core`) built with RAII and `libusb-1.0`.
 2. A fast headless CLI tool (`atk-dl16.exe`) for automation, scripting, and CI pipelines.
 3. A deterministic digital waveform analysis suite (NumPy-accelerated) for cycle-by-cycle PWM, deadtime, shoot-through detection, and three-phase motor inverter analysis.
-4. An autonomous MCP server (`atk-dl16-mcp`) allowing AI assistants (Claude, Codex, Antigravity) to directly control logic captures, inspect signals, and execute HIL test assertions.
+4. An autonomous MCP server (`atk-dl16-mcp`) allowing AI assistants (Claude Code, Codex, Pi, and other MCP clients) to directly control logic captures, inspect signals, and execute HIL test assertions.
 
 ---
 
@@ -14,7 +14,7 @@ Derived from the official [alientek-openedv/atk-logic](https://github.com/alient
 
 ```text
 ┌─────────────────────────────────────────────────────────┐
-│                   Codex / AI Agent                      │
+│             Claude Code / Codex / Pi                   │
 └───────────────────────────┬─────────────────────────────┘
                             │ Model Context Protocol (stdio)
                             ▼
@@ -142,25 +142,29 @@ Device Information:
 
 ## 5. MCP Server Integration & One-Click Install
 
-### 5.1 One-Click Installation (Codex, Claude Desktop, Cursor)
+### 5.1 Cross-Client Installation (Claude Code, Codex CLI, Pi)
 
-The package includes a one-click automated installer that installs dependencies, registers the `atk-dl16-mcp` command, embeds the prebuilt static CLI binary, and automatically writes the MCP configuration:
+The server uses the standard MCP `stdio` transport, so the same tools work in Claude Code, Codex CLI, Pi, Cursor, and other MCP clients. The installer only adapts the configuration format for each client. It installs dependencies, registers the `atk-dl16-mcp` command, embeds the prebuilt static CLI binary when available, and writes the selected MCP configuration.
 
 #### Option A: PowerShell One-Click Install (Windows)
 ```powershell
-# Auto-configure Codex
+# Configure Claude Code, Codex, and Pi in one pass
+.\install.ps1 -Client all
+
+# Or configure one client
 .\install.ps1 -Client codex
-
-# Auto-configure Claude Desktop
-.\install.ps1 -Client claude
-
-# Auto-configure Cursor
+.\install.ps1 -Client claude-code
+.\install.ps1 -Client pi
 .\install.ps1 -Client cursor
 ```
 
+The `claude` client name is retained as an alias for `claude-code`. Use `claude-desktop` only when configuring Claude Desktop.
+
 #### Option B: Python Cross-Platform Install
 ```bash
-python install.py --client codex    # or claude, cursor
+python install.py --client all
+# or: codex, claude-code, pi, cursor
+python install.py --client codex
 ```
 
 #### Option C: Standard Pip Install & Configuration
@@ -170,16 +174,47 @@ pip install -e .
 # Inspect connected hardware
 atk-dl16-mcp status
 
-# Inject configuration into Codex / Claude / Cursor
+# Inject configuration into a selected client
 atk-dl16-mcp install --client codex
+atk-dl16-mcp install --client claude-code
+atk-dl16-mcp install --client pi
 
-# Or print standard JSON snippet to copy-paste
+# Configure all three cross-client targets
+atk-dl16-mcp install --client all --project-root .
+
+# Print the native configuration format for a client
 atk-dl16-mcp config --client codex
+atk-dl16-mcp config --client claude-code
+atk-dl16-mcp config --client pi
 ```
 
-### 5.2 Manual Configuration Snippet
+`--project-root` controls where project-scoped `.mcp.json` and `.pi/mcp.json` are written. The repository installers set it automatically, so they can be launched from any working directory.
 
-Add the following block to your client's MCP configuration file (e.g. `~/.codex/config.json`, `%APPDATA%\Claude\claude_desktop_config.json`, or `.cursor/mcp.json`):
+Pi needs the MCP extension once before it can load local MCP servers:
+
+```bash
+pi install npm:pi-mcp-extension
+```
+
+The installer writes Pi's project configuration to `.pi/mcp.json`. For a global Pi setup, copy the same server entry to `~/.pi/agent/mcp.json`.
+
+### 5.2 Windows x64 Offline Package
+
+The GitHub Release includes `ATK-DL16-MCP-Windows-x64-v*.zip`. This archive contains an embedded Python runtime, all Python dependencies, the native CLI, and the Pi MCP extension with its runtime dependencies. On the target machine, extract the archive and double-click `install-offline.cmd`; the installer does not invoke `pip` or `npm` and does not access the network.
+
+The offline installer configures Claude Code, Codex, and Pi globally by default. Use `-ProjectRoot` for project-scoped Claude Code and Pi configuration:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-offline.ps1 `
+  -Client all `
+  -ProjectRoot "D:\work\my-project"
+```
+
+The bundle installs under `%LOCALAPPDATA%\ATK-DL16-MCP` and writes captures to its writable `data` directory. The AI clients themselves are prerequisites and are not redistributed in the archive.
+
+### 5.3 Manual Configuration
+
+Claude Code project configuration (`.mcp.json`):
 
 ```json
 {
@@ -191,20 +226,34 @@ Add the following block to your client's MCP configuration file (e.g. `~/.codex/
 }
 ```
 
-Or invoke via Python module:
+Codex CLI configuration (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.atk-dl16]
+command = "python"
+args = ["-m", "atk_dl16_mcp"]
+```
+
+Pi project configuration (`.pi/mcp.json`):
 
 ```json
 {
   "mcpServers": {
     "atk-dl16": {
       "command": "python",
-      "args": [
-        "-m",
-        "atk_dl16_mcp"
-      ]
+      "args": ["-m", "atk_dl16_mcp"],
+      "transport": "stdio",
+      "lifecycle": "eager"
     }
   }
 }
+```
+
+The generated snippets use the active Python interpreter's absolute path, which is safer when the clients have different `PATH` environments. The equivalent client commands are:
+
+```bash
+claude mcp add atk-dl16 --scope project -- python -m atk_dl16_mcp
+codex mcp add atk-dl16 -- python -m atk_dl16_mcp
 ```
 
 ### Exposed MCP Tools

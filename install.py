@@ -3,7 +3,7 @@
 Cross-Platform One-Click Installer for ATK-DL16 MCP Server.
 
 Usage:
-    python install.py [--client codex|claude|cursor|none]
+    python install.py [--client all|codex|claude-code|pi|cursor|none]
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ def main():
     parser.add_argument(
         "--client",
         default="codex",
-        choices=["codex", "claude", "cursor", "none"],
-        help="Target AI client to configure (default: codex)"
+    choices=["all", "codex", "claude-code", "claude-code-user", "claude", "claude-desktop", "pi", "pi-global", "cursor", "none"],
+        help="Target AI client to configure (default: codex; all configures Claude Code, Codex, and Pi)"
     )
     args = parser.parse_args()
 
@@ -56,13 +56,13 @@ def main():
     cmd_status()
 
     if args.client != "none":
-        ret = cmd_install(args.client)
+        ret = cmd_install(args.client, project_root=root_dir)
         if ret != 0:
             print("[Warning] Failed to auto-install config. You can manually copy the config snippet below:")
-            cmd_config("codex")
+            cmd_config(args.client, project_root=root_dir)
     else:
-        print("\nMCP Configuration snippet for manual copy-paste:")
-        cmd_config("codex")
+        print("\nMCP Configuration snippets for manual copy-paste:")
+        cmd_config("all", project_root=root_dir)
 
     print("\n" + "=" * 60)
     print("  Installation Complete! Restart your AI client to use ATK-DL16.")

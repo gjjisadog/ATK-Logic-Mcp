@@ -4,13 +4,16 @@
 
 .DESCRIPTION
     Installs Python dependencies, registers the CLI command, embeds prebuilt binaries,
-    and configures MCP clients (Codex, Claude Desktop, Cursor).
+    and configures MCP clients (Claude Code, Codex, Pi, and optionally Cursor).
 
 .PARAMETER Client
-    Target MCP client to configure: 'codex', 'claude', 'cursor', or 'none'. Default is 'codex'.
+    Target MCP client to configure: 'all', 'codex', 'claude-code', 'claude-code-user',
+    'claude-desktop', 'pi', 'pi-global', 'cursor', or 'none'.
+    Default is 'codex'.
 #>
 
 param (
+    [ValidateSet("all", "codex", "claude-code", "claude-code-user", "claude", "claude-desktop", "pi", "pi-global", "cursor", "none")]
     [string]$Client = "codex"
 )
 
@@ -58,10 +61,10 @@ try {
 
 if ($Client -ne "none") {
     Write-Host "`nConfiguring target client: $Client" -ForegroundColor Cyan
-    & atk-dl16-mcp install --client $Client
+    & atk-dl16-mcp install --client $Client --project-root $PSScriptRoot
 } else {
     Write-Host "`nMCP Configuration snippet:" -ForegroundColor Cyan
-    & atk-dl16-mcp config --client codex
+    & atk-dl16-mcp config --client all --project-root $PSScriptRoot
 }
 
 Write-Host "`n============================================================" -ForegroundColor Green
