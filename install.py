@@ -3,7 +3,7 @@
 Cross-Platform One-Click Installer for ATK-DL16 MCP Server.
 
 Usage:
-    python install.py [--client all|codex|claude-code|pi|cursor|none]
+    python install.py [--client all|codex|claude-code|pi|cursor|dsh|none]
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ def main():
     parser.add_argument(
         "--client",
         default="codex",
-    choices=["all", "codex", "claude-code", "claude-code-user", "claude", "claude-desktop", "pi", "pi-global", "cursor", "none"],
+        choices=["all", "codex", "claude-code", "claude-code-user", "claude", "claude-desktop", "pi", "pi-global", "cursor", "dsh", "none"],
         help="Target AI client to configure (default: codex; all configures Claude Code, Codex, and Pi)"
     )
     args = parser.parse_args()

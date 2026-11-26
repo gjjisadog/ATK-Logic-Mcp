@@ -4,16 +4,16 @@
 
 .DESCRIPTION
     Installs Python dependencies, registers the CLI command, embeds prebuilt binaries,
-    and configures MCP clients (Claude Code, Codex, Pi, and optionally Cursor).
+    and configures MCP clients (Claude Code, Codex, Pi, Cursor, and DSH).
 
 .PARAMETER Client
     Target MCP client to configure: 'all', 'codex', 'claude-code', 'claude-code-user',
-    'claude-desktop', 'pi', 'pi-global', 'cursor', or 'none'.
+    'claude-desktop', 'pi', 'pi-global', 'cursor', 'dsh', or 'none'.
     Default is 'codex'.
 #>
 
 param (
-    [ValidateSet("all", "codex", "claude-code", "claude-code-user", "claude", "claude-desktop", "pi", "pi-global", "cursor", "none")]
+    [ValidateSet("all", "codex", "claude-code", "claude-code-user", "claude", "claude-desktop", "pi", "pi-global", "cursor", "dsh", "none")]
     [string]$Client = "codex"
 )
 

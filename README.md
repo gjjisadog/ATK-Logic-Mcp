@@ -144,7 +144,7 @@ Device Information:
 
 ### 5.1 Cross-Client Installation (Claude Code, Codex CLI, Pi)
 
-The server uses the standard MCP `stdio` transport, so the same tools work in Claude Code, Codex CLI, Pi, Cursor, and other MCP clients. The installer only adapts the configuration format for each client. It installs dependencies, registers the `atk-dl16-mcp` command, embeds the prebuilt static CLI binary when available, and writes the selected MCP configuration.
+The server uses the standard MCP `stdio` transport, so the same tools work in Claude Code, Codex CLI, Pi, Cursor, and DeepSeek Harness (DSH). The installer adapts the configuration format for each client. It installs dependencies, registers the `atk-dl16-mcp` command, embeds the prebuilt static CLI binary when available, and writes the selected MCP configuration.
 
 #### Option A: PowerShell One-Click Install (Windows)
 ```powershell
@@ -156,6 +156,7 @@ The server uses the standard MCP `stdio` transport, so the same tools work in Cl
 .\install.ps1 -Client claude-code
 .\install.ps1 -Client pi
 .\install.ps1 -Client cursor
+.\install.ps1 -Client dsh
 ```
 
 The `claude` client name is retained as an alias for `claude-code`. Use `claude-desktop` only when configuring Claude Desktop.
@@ -163,7 +164,7 @@ The `claude` client name is retained as an alias for `claude-code`. Use `claude-
 #### Option B: Python Cross-Platform Install
 ```bash
 python install.py --client all
-# or: codex, claude-code, pi, cursor
+# or: codex, claude-code, pi, cursor, dsh
 python install.py --client codex
 ```
 
@@ -198,7 +199,26 @@ pi install npm:pi-mcp-extension
 
 The installer writes Pi's project configuration to `.pi/mcp.json`. For a global Pi setup, copy the same server entry to `~/.pi/agent/mcp.json`.
 
-### 5.2 Windows x64 Offline Package
+### 5.2 DeepSeek Harness (DSH)
+
+With DeepSeek Harness and the Python package installed, run:
+
+```bash
+atk-dl16-mcp install --client dsh
+```
+
+This registers the server through `@deepseek-ai/dsh-mcp-client` in `~/.dsh/cordis.patch.yml` (or `$DSH_HOME/cordis.patch.yml` if set) for all DSH profiles. Restart DSH and look for `mcp__atk-dl16__logic_status` in the tool list.
+
+To try the configuration for a single run, generate a standalone overlay and pass it to DSH:
+
+```bash
+atk-dl16-mcp config --client dsh > atk-dl16.cordis.yml
+dsh web --patch ./atk-dl16.cordis.yml
+```
+
+For a persistent single-profile setup, merge that `insert` operation into the profile's `cordis.patch.yml`. See the [official DSH MCP configuration guide](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/mcp-memory.md).
+
+### 5.3 Windows x64 Offline Package
 
 The GitHub Release includes `ATK-DL16-MCP-Windows-x64-v*.zip`. This archive contains an embedded Python runtime, all Python dependencies, the native CLI, and the Pi MCP extension with its runtime dependencies. On the target machine, extract the archive and double-click `install-offline.cmd`; the installer does not invoke `pip` or `npm` and does not access the network.
 
@@ -210,9 +230,11 @@ powershell -ExecutionPolicy Bypass -File .\install-offline.ps1 `
   -ProjectRoot "D:\work\my-project"
 ```
 
+To configure an existing DSH installation, run `install-offline.cmd -Client dsh`.
+
 The bundle installs under `%LOCALAPPDATA%\ATK-DL16-MCP` and writes captures to its writable `data` directory. The AI clients themselves are prerequisites and are not redistributed in the archive.
 
-### 5.3 Manual Configuration
+### 5.4 Manual Configuration
 
 Claude Code project configuration (`.mcp.json`):
 

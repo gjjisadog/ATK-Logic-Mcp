@@ -24,13 +24,23 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from textwrap import indent
 from typing import Any, Dict, Optional
+
+import yaml
 
 from .server import _find_cli, logic_status, server
 
 
 SERVER_NAME = "atk-dl16"
 ROOT_DIR = Path(__file__).resolve().parent.parent
+DSH_MCP_CLIENT = "@deepseek-ai/dsh-mcp-client"
+DSH_MCP_ENTRY_ID = f"mcp-{SERVER_NAME}"
+DSH_PATCH_BEGIN = "# BEGIN ATK-DL16 MCP"
+DSH_PATCH_END = "# END ATK-DL16 MCP"
+DSH_PATCH_BLOCK = re.compile(
+    rf"(?ms)^{DSH_PATCH_BEGIN}\r?\n.*?^{DSH_PATCH_END}(?:\r?\n|$)"
+)
 
 # ``claude`` is kept as a compatibility alias, but it now means Claude Code.
 # Claude Desktop remains available explicitly as ``claude-desktop``.
@@ -54,6 +64,7 @@ SUPPORTED_CLIENTS = (
     "pi",
     "pi-global",
     "cursor",
+    "dsh",
     "all",
 )
 
@@ -78,6 +89,12 @@ def _codex_config_path() -> Path:
     codex_home = os.environ.get("CODEX_HOME")
     base_dir = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
     return base_dir / "config.toml"
+
+
+def _dsh_config_path() -> Path:
+    dsh_home = os.environ.get("DSH_HOME")
+    base_dir = Path(dsh_home).expanduser().resolve() if dsh_home else Path.home() / ".dsh"
+    return base_dir / "cordis.patch.yml"
 
 
 def _claude_desktop_config_path() -> Path:
@@ -110,6 +127,7 @@ def get_client_config_path(client: str, project_root: Optional[Path] = None) -> 
         "codex": _codex_config_path(),
         "pi": resolved_project_root / ".pi" / "mcp.json",
         "pi-global": _pi_agent_dir() / "mcp.json",
+        "dsh": _dsh_config_path(),
     }
     try:
         return paths[normalized]
@@ -130,12 +148,14 @@ CLIENT_CONFIG_PATHS = {
     "codex": _codex_config_path(),
     "pi": _project_root() / ".pi" / "mcp.json",
     "pi-global": _pi_agent_dir() / "mcp.json",
+    "dsh": _dsh_config_path(),
 }
 
 
 def _server_command() -> tuple[str, list[str]]:
     """Build a client-independent stdio command for the installed package."""
-    executable = str(Path(sys.executable).resolve())
+    # Keep the virtual environment's executable path so it can import the package.
+    executable = str(Path(sys.executable).absolute())
     return executable, ["-m", "atk_dl16_mcp"]
 
 
@@ -213,6 +233,71 @@ def render_codex_config() -> str:
         for key, value in runtime_env.items():
             rendered += f"{key} = {_toml_string(value)}\n"
     return rendered
+
+
+def _dsh_patch() -> Dict[str, Any]:
+    entry = {
+        "id": DSH_MCP_ENTRY_ID,
+        "name": DSH_MCP_CLIENT,
+        "config": {"serverName": SERVER_NAME, "transport": "stdio", **_stdio_entry()},
+    }
+    return {"insert": [entry]}
+
+
+def render_dsh_config() -> str:
+    """Render a standalone DeepSeek Harness Cordis overlay."""
+    return yaml.safe_dump([_dsh_patch()], sort_keys=False, allow_unicode=True)
+
+
+def _install_dsh_config(path: Path) -> None:
+    existing = path.read_bytes().decode("utf-8") if path.exists() else ""
+    # Compose without executing or reserializing Cordis tags such as !!js.
+    root = yaml.compose(existing, Loader=yaml.BaseLoader)
+    if root is not None and not isinstance(root, yaml.SequenceNode):
+        raise ValueError("expected a sequence of Cordis patches")
+
+    blocks = list(DSH_PATCH_BLOCK.finditer(existing))
+    if len(blocks) > 1:
+        raise ValueError("found multiple managed ATK-DL16 MCP blocks")
+    flow_style = root is not None and root.flow_style
+    if flow_style:
+        body = json.dumps(_dsh_patch(), ensure_ascii=False) + ",\n"
+    else:
+        body = render_dsh_config()
+        if root is not None:
+            body = indent(body, " " * root.start_mark.column)
+    newline = "\r\n" if "\r\n" in existing else "\n"
+    block = f"{DSH_PATCH_BEGIN}\n{body}{DSH_PATCH_END}\n".replace("\n", newline)
+
+    if blocks:
+        match = blocks[0]
+        updated = existing[:match.start()] + block + existing[match.end():]
+    elif flow_style:
+        start = root.start_mark.index
+        if existing[start] != "[":
+            raise ValueError("expected an untagged flow sequence of Cordis patches")
+        updated = existing[:start + 1] + newline + block + existing[start + 1:]
+    else:
+        end = root.end_mark.index if root is not None else len(existing)
+        before = existing[:end]
+        separator = newline if before and not before.endswith("\n") else ""
+        updated = before + separator + block + existing[end:]
+
+    patches = yaml.load(updated, Loader=yaml.BaseLoader)
+    server_rows = [
+        row
+        for patch in patches if isinstance(patch, dict) and isinstance(patch.get("insert"), list)
+        for row in patch["insert"] if isinstance(row, dict)
+        if row.get("id") == DSH_MCP_ENTRY_ID or (
+            row.get("name") == DSH_MCP_CLIENT
+            and isinstance(row.get("config"), dict)
+            and row["config"].get("serverName") == SERVER_NAME
+        )
+    ]
+    if len(server_rows) != 1:
+        raise ValueError("expected one ATK-DL16 MCP entry; check for an existing server registration")
+    if updated != existing:
+        _write_text_atomically(path, updated)
 
 
 def _write_text_atomically(path: Path, content: str) -> None:
@@ -387,6 +472,13 @@ def cmd_config(
             print(render_codex_config(), end="")
         return 0
 
+    if normalized == "dsh":
+        if output_format != "auto":
+            print("[Error] DSH configuration uses YAML; use --format auto")
+            return 1
+        print(render_dsh_config(), end="")
+        return 0
+
     if output_format == "toml":
         print("[Error] --format toml is only valid for --client codex")
         return 1
@@ -407,6 +499,17 @@ def cmd_install(client: str = "codex", project_root: Optional[Path] = None) -> i
 
     if normalized == "codex":
         return _upsert_codex_config(get_client_config_path(normalized, project_root))
+
+    if normalized == "dsh":
+        path = get_client_config_path(normalized)
+        try:
+            _install_dsh_config(path)
+        except (OSError, ValueError, yaml.YAMLError) as ex:
+            print(f"[Error] Could not configure dsh at {path}: {ex}")
+            return 1
+        print("[OK] Configured dsh MCP server")
+        print(f"     Configuration file: {path}")
+        return 0
 
     if normalized not in {
         "claude-code",

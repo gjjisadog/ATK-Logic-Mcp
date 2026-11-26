@@ -7,7 +7,7 @@
 - 静态链接的 `atk-dl16.exe`；
 - Pi 的 `pi-mcp-extension` 及其 npm 运行依赖。
 
-目标电脑安装时不会运行 `pip`、`npm`，也不会访问互联网。Claude Code、Codex 或 Pi 客户端本身需要预先安装；客户端软件不包含在本包中。
+目标电脑安装时不会运行 `pip`、`npm`，也不会访问互联网。Claude Code、Codex、Pi 和 DeepSeek Harness（DSH）客户端需要预先安装。
 
 ## 一键安装
 
@@ -17,6 +17,8 @@
 4. 重启对应客户端。
 
 安装位置默认为 `%LOCALAPPDATA%\ATK-DL16-MCP`，采集数据默认为 `%LOCALAPPDATA%\ATK-DL16-MCP\data`。配置文件会保留其它 MCP 服务；已有的 Pi 无效 JSON 会先备份为 `.bak`。
+
+DSH 用户可以运行 `install-offline.cmd -Client dsh`。安装器更新当前用户的 `cordis.patch.yml`。重启 DSH 后，查看工具列表中的 `mcp__atk-dl16__logic_status`。
 
 ## 项目级配置
 

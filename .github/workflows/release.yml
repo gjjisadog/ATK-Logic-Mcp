@@ -1,0 +1,51 @@
+name: Build Windows offline package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-offline:
+    runs-on: windows-2022
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build the offline bundle
+        shell: pwsh
+        run: |
+          $version = python -c "import pathlib, tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"
+          .\packaging\windows\build-offline-package.ps1 -Version $version
+
+      - name: Verify offline DSH installation
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem -LiteralPath dist -Filter '*.zip' -File
+          $bundle = Join-Path $env:RUNNER_TEMP 'atk-dl16-bundle'
+          $env:DSH_HOME = Join-Path $env:RUNNER_TEMP 'atk-dl16-dsh-home'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $bundle
+          & (Join-Path $bundle 'install-offline.ps1') -Client dsh -InstallRoot (Join-Path $env:RUNNER_TEMP 'atk-dl16-install')
+          $patch = Join-Path $env:DSH_HOME 'cordis.patch.yml'
+          if (-not (Select-String -LiteralPath $patch -SimpleMatch 'serverName: atk-dl16' -Quiet)) {
+            throw 'The offline installer did not register the ATK-DL16 MCP server in DSH.'
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-offline
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0

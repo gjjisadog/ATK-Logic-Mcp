@@ -10,7 +10,7 @@
 
 [CmdletBinding()]
 param (
-    [ValidateSet("all", "codex", "claude-code", "claude-code-user", "claude-desktop", "pi", "pi-global", "cursor", "none")]
+    [ValidateSet("all", "codex", "claude-code", "claude-code-user", "claude-desktop", "pi", "pi-global", "cursor", "dsh", "none")]
     [string]$Client = "all",
     [string]$ProjectRoot = "",
     [string]$InstallRoot = ""
@@ -198,4 +198,4 @@ if ($Client -eq "none") {
 Write-Host "[5/5] Offline installation complete." -ForegroundColor Green
 Write-Host "     Runtime: $pythonTarget"
 Write-Host "     Data:    $dataTarget"
-Write-Host "     Restart Claude Code, Codex, or Pi to load the MCP server."
+Write-Host "     Restart your MCP client to load the MCP server."
